@@ -1,0 +1,8 @@
+.secrets.json
+.testwallet.json
+.env
+.env.local
+.last*
+tools
+src
+node_modules

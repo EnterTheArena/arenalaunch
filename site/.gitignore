@@ -1,0 +1,10 @@
+.vercel
+.env*
+.testwallet.json
+.lastbundle.json
+.lastcreate.json
+.lastmint.txt
+node_modules
+tools/.pump-sim.bundle.mjs
+tools/.sim-state.json
+tools/.relay-check.bundle.mjs

@@ -1,0 +1,19 @@
+{
+  "name": "pumpcall-lobby",
+  "main": "src/index.js",
+  "compatibility_date": "2025-06-01",
+  "observability": { "enabled": true },
+  // the relay is served only at its own domain (the account-wide workers.dev address is off)
+  "workers_dev": false,
+  "routes": [{ "pattern": "relay.arenalaunch.bond", "custom_domain": true }],
+  "durable_objects": {
+    "bindings": [{ "name": "LOBBY", "class_name": "Lobby" }, { "name": "RATELIMIT", "class_name": "RateLimit" }, { "name": "ACCOUNTS", "class_name": "Accounts" }, { "name": "STATS", "class_name": "Stats" }]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["Lobby"] },
+    { "tag": "v2", "new_sqlite_classes": ["RateLimit"] },
+    { "tag": "v3", "new_sqlite_classes": ["Accounts"] },
+    { "tag": "v4", "new_sqlite_classes": ["Stats"] }
+  ],
+  "vars": { "ALLOWED_ORIGINS": "https://arenalaunch.fun,https://www.arenalaunch.fun,https://arenalaunch.bond,https://www.arenalaunch.bond,https://arenalaunch.vercel.app" }
+}

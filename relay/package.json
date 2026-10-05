@@ -1,0 +1,15 @@
+{
+  "name": "pumpcall-lobby",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "dependencies": {
+    "@noble/curves": "^2.2.0",
+    "bs58": "^6.0.0",
+    "ethers": "^6.17.0",
+    "wrangler": "^4.100.0"
+  }
+}

@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="robots" content="noindex" />
+<title>arenalaunch · usage</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+<link rel="preconnect" href="https://fonts.googleapis.com" /><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,700..900&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+  :root{--paper:#07080c;--sheet:#0f1117;--ink:#f2f4f8;--ink2:#c3c8d6;--mute:#8a90a6;--rule:#1b1e28;--rule2:#2a2e3b;--bar:#c4ff3d;--signal:#d8ff7a;--ok:#3ee08f;--err:#ff6370;--mono:'IBM Plex Mono',ui-monospace,monospace;color-scheme:dark} /* dark, same palette as the app */
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--paper);color:var(--ink);font:14px/1.45 'Inter',system-ui,sans-serif}
+  .wrap{max-width:1180px;margin:0 auto;padding:0 16px 60px}
+  .top{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;border-bottom:1px solid var(--ink);padding:18px 0 12px}
+  .top b{font-weight:900;font-size:26px;letter-spacing:-.03em;font-variation-settings:'wdth' 72}
+  .top .k{font-family:var(--mono);font-size:12px;color:var(--mute)}
+  .top .sp{flex:1}
+  .top button{border:0;background:none;color:var(--mute);font-family:var(--mono);font-size:12px;cursor:pointer;padding:0}
+  .top button:hover{color:var(--ink)}
+  /* hero numbers */
+  .tiles{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));border-bottom:1px solid var(--rule)}
+  @media(max-width:860px){.tiles{grid-template-columns:repeat(2,minmax(0,1fr))}}
+  .tile{padding:22px 18px 20px 0}
+  .key input{border-radius:8px} .key button{border-radius:8px;background:var(--bar)!important}
+  .tile+.tile{padding-left:18px;border-left:1px solid var(--rule)}
+  @media(max-width:860px){.tile:nth-child(odd){padding-left:0;border-left:0}.tile{border-bottom:1px solid var(--rule)}}
+  .lbl{font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute)}
+  .big{font-family:var(--mono);font-size:44px;font-weight:500;letter-spacing:-.03em;line-height:1.1;margin-top:6px;font-variant-numeric:tabular-nums}
+  .sub{font-family:var(--mono);font-size:12px;color:var(--ink2);margin-top:4px}
+  /* small multiples */
+  .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 40px}
+  @media(max-width:860px){.grid{grid-template-columns:minmax(0,1fr)}}
+  .chart{padding:22px 0 10px;border-bottom:1px solid var(--rule)}
+  .chart h3{margin:0;font-size:17px;font-weight:800;font-variation-settings:'wdth' 85;display:flex;justify-content:space-between;align-items:baseline}
+  .chart h3 span{font-family:var(--mono);font-size:12px;font-weight:500;color:var(--mute)}
+  .plot{position:relative;height:150px;margin-top:12px}
+  .plot svg{display:block;width:100%;height:150px;overflow:visible}
+  .axis{font-family:var(--mono);font-size:10.5px;fill:var(--mute)}
+  .gridl{stroke:var(--rule);stroke-width:1}
+  .tip{position:absolute;pointer-events:none;background:var(--ink);color:var(--paper);font-family:var(--mono);font-size:12px;padding:5px 8px;white-space:nowrap;transform:translate(-50%,-110%);display:none;z-index:2}
+  /* tables */
+  h2{font-size:20px;font-weight:800;font-variation-settings:'wdth' 85;margin:30px 0 4px}
+  .note{font-family:var(--mono);font-size:12px;color:var(--mute);margin:0 0 8px}
+  table{width:100%;border-collapse:collapse;font-size:14px}
+  th{font-family:var(--mono);font-size:10.5px;font-weight:500;letter-spacing:.07em;text-transform:uppercase;color:var(--mute);text-align:left;padding:0 8px 6px;border-bottom:1px solid var(--ink)}
+  td{padding:8px;border-bottom:1px solid var(--rule)} td.r,th.r{text-align:right} .m{font-family:var(--mono);font-size:12.5px}
+  a{color:inherit} .ca{border:0;background:none;padding:0;font:inherit;color:inherit;cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px} .ca:hover{color:var(--signal)} .ok{color:var(--ok)} .bad{color:var(--err)}
+  details summary{cursor:pointer;font-family:var(--mono);font-size:12px;color:var(--mute);margin-top:14px}
+  .key{max-width:420px;margin:80px auto;padding:0 16px}
+  .key input{width:100%;padding:10px;border:1px solid var(--rule2);background:var(--sheet);color:var(--ink);font-family:var(--mono)}
+  .key button{margin-top:10px;width:100%;padding:12px;border:0;background:var(--signal);color:#0b1200;font-weight:900;text-transform:uppercase;cursor:pointer}
+  .err{color:var(--err);font-family:var(--mono);font-size:12px;margin-top:8px;min-height:16px}
+  /* problems users hit */
+  .probs h2{display:flex;align-items:baseline;gap:12px} .probs h2 span{font-family:var(--mono);font-size:12px;font-weight:500;color:var(--mute)}
+  .probs .tools{display:flex;gap:16px;align-items:center;margin:0 0 8px} .probs .tools .note{margin:0;flex:1}
+  .probs button.lnk{border:0;background:none;padding:0;font-family:var(--mono);font-size:12px;color:var(--mute);cursor:pointer;text-decoration:underline dotted} .probs button.lnk:hover{color:var(--err)}
+  .lv{display:inline-block;font-family:var(--mono);font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;padding:1px 6px;margin-right:8px;border:1px solid currentColor}
+  .lv.error{color:var(--err)} .lv.warn{color:var(--mute)} .msg{overflow-wrap:anywhere} .src{color:var(--mute);font-family:var(--mono);font-size:11px;margin-top:3px}
+  .probs .empty{color:var(--mute);font-family:var(--mono);font-size:12.5px;padding:14px 8px}
+</style>
+</head>
+<body>
+<div class="key" id="keyBox" style="display:none">
+  <b style="font-size:28px;font-weight:900;font-variation-settings:'wdth' 72">arenalaunch usage</b>
+  <p class="note" style="margin:10px 0 18px">Private. Sign in with the admin wallet in Phantom. Signing does not move funds.</p>
+  <button id="keyGo">Sign in with Phantom</button><div class="err" id="keyErr"></div>
+</div>
+<div class="wrap" id="dash" style="display:none">
+  <div class="top"><b>arenalaunch</b><span class="k">usage</span><span class="sp"></span><span class="k" id="upd"></span><button id="signOut">sign out</button><button id="theme" style="display:none">◐ theme</button></div>
+  <div class="tiles" id="tiles"></div>
+  <div class="probs">
+    <h2>Problems users hit <span id="probCount"></span></h2>
+    <div class="tools"><p class="note">Every error someone saw on the site or the relay hit in their lobby, newest first. The same message from the same lobby within 2 minutes counts once (×n). Grey = a warning or the user cancelling in Phantom.</p><button class="lnk" id="probClear">clear list</button></div>
+    <table><thead><tr><th>When</th><th>What happened</th><th>Wallet</th><th>Lobby</th><th>Browser</th></tr></thead><tbody id="probs"></tbody></table>
+  </div>
+  <div class="grid" id="charts"></div>
+  <details><summary>Daily numbers as a table</summary><table id="dayTable"></table></details>
+  <h2>Recent launches</h2>
+  <p class="note">Real launches only (rehearsals are counted above, not listed). "Buys landed" counts the launch transaction plus each follow-up buy that made it.</p>
+  <table><thead><tr><th>When</th><th>Coin</th><th>Result</th><th class="r">Buys landed</th></tr></thead><tbody id="recent"></tbody></table>
+  <h2>Latest sign-ups</h2>
+  <p class="note">Phantom wallets that signed in for the first time, newest first.</p>
+  <table><thead><tr><th>When</th><th>Wallet</th><th class="r">Saved extra wallets</th></tr></thead><tbody id="signups"></tbody></table>
+  <p class="note" id="since" style="margin-top:22px"></p>
+</div>
+<script src="/stats.js"></script>
+</body>
+</html>

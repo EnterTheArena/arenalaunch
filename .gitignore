@@ -1,0 +1,9 @@
+node_modules/
+.env*
+.dev.vars
+.secrets.json
+.testwallet.json
+.vercel/
+.wrangler/
+site/tools/.*
+site/.last*
