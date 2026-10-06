@@ -36,6 +36,8 @@ cd ../relay && npm install && npx wrangler dev
 
 Relay settings: `ALLOWED_ORIGINS` (wrangler.jsonc), and secrets `ADMIN_WALLET` (the wallet allowed into /stats), `SOL_RPC_URL`, `ACCOUNT_SECRET` / `GATE_SECRET`, `RL_KEY`.
 
+Email sign-in (code + password) needs two more relay secrets: `RESEND_API_KEY` (resend.com, with your sending domain verified) and `EMAIL_FROM` (e.g. `arenalaunch <login@arenalaunch.bond>`). Without them the email form answers "email sign-in is not set up yet" and nothing else changes. The password is stretched in the browser and never sent; a forgotten password cannot be reset, by anyone, because it also locks the saved wallets.
+
 ## Checks
 
 ```bash
@@ -43,6 +45,7 @@ cd site
 node tools/build-sim.mjs relay-check && node tools/.relay-check.bundle.mjs   # relay validation vs. client-built transactions
 node tools/build-sim.mjs fee-sim && node tools/.fee-sim.bundle.mjs --coin <mint>   # mainnet simulation of a buy + fee
 node tools/lobby-check.mjs     # live lobby rules
+node tools/email-check.mjs     # email sign-in rules (offline)
 node tools/build-sim.mjs group-check && node tools/.group-check.bundle.mjs   # dev + 3 teammates rehearsal
 ```
 

@@ -10,6 +10,15 @@
 //   /account/wallet   {address, message, sig}   → {session, id, vault, ver}   (Sign In With Solana; creates the account on first sign-in)
 //   /account/vault    {session}                 → {vault, ver}
 //   /account/save     {session, vault, ver}     → {ver}            (ver must match: no silent overwrite from a stale tab)
+//   /account/email-start {email}                       → {ticket}   (emails a 6-digit code; says nothing about whether the account exists)
+//   /account/email-check {email, ticket, code}         → {exists}   (code right? does this email have an account yet?)
+//   /account/email-login {email, ticket, code, auth}   → {session, id, vault, ver}   (uses the code up; creates the account on first sign-in)
+// A code belongs to the browser that asked for it (its ticket): someone else asking for codes for your email, or guessing
+// wrong, never touches yours.
+//
+// Email accounts are zero-knowledge too: the browser stretches the password (PBKDF2, 600k rounds, salted with the email)
+// and splits it into an AUTH key, sent here and stored only as an HMAC, and a VAULT key that never leaves the browser.
+// Every email sign-in needs the emailed code AND the password, so a leaked password alone opens nothing.
 // ============================================================================
 import { ed25519 } from '@noble/curves/ed25519.js';
 import bs58 from 'bs58';
@@ -53,6 +62,29 @@ export async function readSession(env, token) {
   return exp > Date.now() ? id : null;
 }
 
+// ---- email sign-in ----
+const CODE_MS = 10 * 60000, CODE_TRIES = 5, SEND_GAP_MS = 30000, SENDS_PER_HOUR = 8, PW_FAILS = 10, PW_LOCK_MS = 60 * 60000;
+// lower-cased, trimmed; a plain address only (no quotes, spaces or '|', which the session token uses as a separator)
+export const cleanEmail = (v) => { const e = String(v || '').trim().toLowerCase(); return e.length <= 254 && /^[a-z0-9._%+-]{1,64}@[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,24}$/.test(e) ? e : null; };
+const codeHash = (env, email, code) => hmac(secretOf(env), 'code:' + email + ':' + code);
+const authHash = (env, email, auth) => hmac(secretOf(env), 'email-auth:' + email + ':' + auth);
+async function sendCode(env, email, code) {
+  if (!env.RESEND_API_KEY || !env.EMAIL_FROM) throw new Error('email sign-in is not set up yet');
+  const text = 'Your arenalaunch sign-in code is ' + code + '\n\nIt works for 10 minutes. If you did not ask for it, ignore this email: nobody can sign in without your password too.\n\nWe will never ask you for this code or your password.';
+  const r = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { authorization: 'Bearer ' + env.RESEND_API_KEY, 'content-type': 'application/json' }, body: JSON.stringify({ from: env.EMAIL_FROM, to: [email], subject: 'arenalaunch code: ' + code, text }) });
+  if (!r.ok) throw new Error('could not send the email (' + r.status + ') — try again in a minute');
+}
+// the code for this email, checked (does not use it up); returns {rec} or {error, status}
+const codeKey = async (env, email, ticket) => 'c:' + email + ':' + (await hmac(secretOf(env), 'ticket:' + ticket)).slice(0, 22);
+async function codeOk(env, S, email, ticket, code) {
+  if (!/^[A-Za-z0-9_-]{22}$/.test(String(ticket || ''))) return { error: 'send yourself a new code', status: 400 };
+  const key = await codeKey(env, email, ticket); const c = await S.get(key);
+  if (!c || Date.now() > c.exp) return { error: 'that code expired — send a new one', status: 400 };
+  if (c.tries >= CODE_TRIES) return { error: 'too many wrong codes — send a new one', status: 429 };
+  if (!/^\d{6}$/.test(String(code || '')) || !eq(await codeHash(env, email, String(code)), c.hash)) { c.tries++; await S.put(key, c); return { error: 'wrong code', status: 401 }; }
+  return { rec: c, key };
+}
+
 // One Durable Object holds every account (small records, strictly serialized writes).
 export class Accounts {
   constructor(ctx, env) { this.ctx = ctx; this.env = env; }
@@ -84,9 +116,41 @@ export class Accounts {
       await record(this.env, 'signin', { isNew });
       return view(id, rec);
     }
+    if (op === 'email-start' || op === 'email-check' || op === 'email-login') {
+      const email = cleanEmail(b.email); if (!email) return out({ error: 'enter a valid email address' }, 400);
+      if (op === 'email-start') {
+        const now = Date.now(); const q = (await S.get('q:' + email)) || { sends: [] }; q.sends = q.sends.filter((t) => now - t < 3600000);
+        if (q.sends.length && now - q.sends[q.sends.length - 1] < SEND_GAP_MS) return out({ error: 'a code was just sent — wait a minute before asking for another' }, 429);
+        if (q.sends.length >= SENDS_PER_HOUR) return out({ error: 'too many codes for this email — try again in an hour' }, 429);
+        const code = String(100000 + (crypto.getRandomValues(new Uint32Array(1))[0] % 900000));
+        try { await sendCode(this.env, email, code); } catch (e) { return out({ error: e.message }, 503); }
+        q.sends.push(now); await S.put('q:' + email, q);
+        for (const [k, c] of await S.list({ prefix: 'c:' + email + ':' })) if (now > c.exp) await S.delete(k); // expired codes
+        const ticket = b64u(crypto.getRandomValues(new Uint8Array(16)));
+        await S.put(await codeKey(this.env, email, ticket), { hash: await codeHash(this.env, email, code), exp: now + CODE_MS, tries: 0 });
+        return out({ ok: true, ticket });
+      }
+      const c = await codeOk(this.env, S, email, b.ticket, b.code); if (c.error) return out({ error: c.error }, c.status);
+      const id = 'e:' + email; let rec = await S.get(id);
+      if (op === 'email-check') return out({ exists: !!rec });
+      // email-login: auth is 32 bytes from the browser's key stretch (base64url), never the password itself
+      const auth = String(b.auth || ''); if (!/^[A-Za-z0-9_-]{43}$/.test(auth)) return out({ error: 'this page is out of date — reload it to sign in' }, 400);
+      const h = await authHash(this.env, email, auth); const isNew = !rec;
+      if (rec) {
+        const now = Date.now(); if (rec.lockUntil > now) return out({ error: 'too many wrong passwords — try again in ' + Math.ceil((rec.lockUntil - now) / 60000) + ' min' }, 429);
+        if (!eq(h, rec.auth)) {
+          rec.fails = (rec.fails || 0) + 1; if (rec.fails >= PW_FAILS) { rec.fails = 0; rec.lockUntil = now + PW_LOCK_MS; }
+          await S.put(id, rec); return out({ error: 'wrong password' }, 401);
+        }
+        if (rec.fails || rec.lockUntil) { rec.fails = 0; rec.lockUntil = 0; await S.put(id, rec); }
+      } else { rec = { kind: 'email', name: email, auth: h, vault: null, ver: 0, created: Date.now() }; await S.put(id, rec); }
+      await S.delete(c.key); // the code is used up
+      await record(this.env, 'signin', { isNew });
+      return view(id, rec);
+    }
     if (op === 'count') {
       const byDay = {}; let total = 0, withWallets = 0; const latest = [];
-      for (const [, rec] of await S.list({ prefix: 'w:' })) { if (rec.vault === 'blob1' || rec.vault === 'stale') continue; total++; if (rec.vault) withWallets++; latest.push({ created: rec.created || 0, wallet: rec.name.slice(0, 4) + '…' + rec.name.slice(-4), saved: !!rec.vault }); const d = new Date(rec.created || 0).toISOString().slice(0, 10); byDay[d] = (byDay[d] || 0) + 1; }
+      for (const [, rec] of [...(await S.list({ prefix: 'w:' })), ...(await S.list({ prefix: 'e:' }))]) { if (rec.vault === 'blob1' || rec.vault === 'stale') continue; total++; if (rec.vault) withWallets++; latest.push({ created: rec.created || 0, wallet: rec.kind === 'email' ? rec.name.replace(/^(.).*@/, '$1…@') : rec.name.slice(0, 4) + '…' + rec.name.slice(-4), saved: !!rec.vault }); const d = new Date(rec.created || 0).toISOString().slice(0, 10); byDay[d] = (byDay[d] || 0) + 1; }
       latest.sort((x, y) => y.created - x.created);
       return out({ total, withWallets, byDay, latest: latest.slice(0, 25) });
     }

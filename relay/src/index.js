@@ -60,6 +60,8 @@ async function waitReceipt(hash, ms) { const end = Date.now() + ms; while (Date.
 const JITO = ['https://mainnet.block-engine.jito.wtf', 'https://ny.mainnet.block-engine.jito.wtf', 'https://amsterdam.mainnet.block-engine.jito.wtf', 'https://frankfurt.mainnet.block-engine.jito.wtf', 'https://tokyo.mainnet.block-engine.jito.wtf', 'https://slc.mainnet.block-engine.jito.wtf', 'https://london.mainnet.block-engine.jito.wtf', 'https://dublin.mainnet.block-engine.jito.wtf', 'https://singapore.mainnet.block-engine.jito.wtf'];
 const regionName = (u) => u.replace('https://', '').split('.')[0];
 const MAX_TX = 5;
+const MAX_MEMBERS = 20; // people in one lobby, dev included (pump.fun fee sharing takes 10; the rest just buy)
+const MAX_LOCK_S = 7 * 86400 + 2 * 3600; // the page offers 1 h / 24 h / 7 days after go-live; nothing longer is ever signed
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const json = (o, s = 200) => new Response(JSON.stringify(o), { status: s, headers: { 'content-type': 'application/json', 'access-control-allow-origin': '*' } });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -84,7 +86,7 @@ async function isAdmin(env, req) { if (!env.ADMIN_WALLET) return false; const id
 // a teammate's extra wallets in a launch: {n, sol}, bounded (10 wallets, 100 SOL each)
 const extraOf = (e) => { const n = Math.min(10, Math.max(0, Math.floor(Number(e?.n) || 0))); const sol = Math.min(n * 100, Math.max(0, Number(e?.sol) || 0)); return n && Number.isFinite(sol) && sol > 0 ? { n, sol } : null; };
 const ipOf = (req) => req.headers.get('cf-connecting-ip') || 'unknown';
-const ACCT_LIMITS = { wallet: [30, 60000], nonce: [60, 60000], save: [60, 60000], vault: [120, 60000] };
+const ACCT_LIMITS = { wallet: [30, 60000], nonce: [60, 60000], save: [60, 60000], vault: [120, 60000], 'email-start': [10, 3600000], 'email-check': [30, 60000], 'email-login': [30, 60000] };
 // a buy amount (SOL / ETH): a finite number in (0, 100]; anything else counts as 0
 export const amountOf = (v) => { const n = Number(v); return Number.isFinite(n) && n > 0 && n <= 100 ? n : 0; };
 const cookieToken = (req) => (/(?:^|;\s*)sq_gate=([^;]+)/.exec(req.headers.get('cookie') || '') || [])[1] || null;
@@ -107,7 +109,7 @@ export default {
       return env.RATELIMIT.get(env.RATELIMIT.idFromName('ip:' + ip)).fetch('https://rl/hit', { method: 'POST', body: JSON.stringify({ ok: !!b.ok, limit: 8, windowMs: 15 * 60000 }) });
     }
     // accounts: one Durable Object holds them all (see accounts.js)
-    const acct = /^\/account\/(nonce|wallet|vault|save)$/.exec(u.pathname);
+    const acct = /^\/account\/(nonce|wallet|vault|save|email-start|email-check|email-login)$/.exec(u.pathname);
     if (acct && req.method === 'POST') {
       if (!(await gateOk(env, req.headers.get('x-gate') || cookieToken(req)))) return json({ error: 'gate' }, 401);
       if (!env.ACCOUNT_SECRET && !env.GATE_SECRET) return json({ error: 'accounts are not configured' }, 503); // never sign sessions with an empty key
@@ -290,6 +292,8 @@ export class Lobby {
           if (this.evm) { if (!isEvmAddr(wallet)) return this.send(ws, { t: 'error', msg: 'this is a Robinhood Chain lobby — join with an EVM (0x) wallet' }); wallet = getAddress(wallet); try { ok = lc(verifyMessage(msg, String(b.sig || ''))) === lc(wallet); } catch { ok = false; } }
           else { if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(wallet)) return this.send(ws, { t: 'error', msg: 'this is a Solana lobby — join with a Solana wallet' }); try { ok = ed25519.verify(bs58.decode(String(b.sig || '')), new TextEncoder().encode(msg), bs58.decode(wallet)); } catch { ok = false; } }
           if (!ok) return this.send(ws, { t: 'error', msg: 'signature rejected' });
+          if (await this.ctx.storage.get('ban:' + wallet)) return this.send(ws, { t: 'error', msg: 'the dev removed you from this lobby' });
+          if (!this.members.has(wallet) && b.role !== 'dev' && this.members.size >= MAX_MEMBERS) return this.send(ws, { t: 'error', msg: 'this lobby is full (' + MAX_MEMBERS + ' people)' });
           // the first wallet to take the dev seat keeps it for good — connected or not, it never passes to anyone else
           if (b.role === 'dev') { if (this.dev && this.dev !== wallet) return this.send(ws, { t: 'error', msg: 'this lobby already has a dev' }); if (!this.dev) { this.dev = wallet; await this.persist(); } }
           const prev = this.members.get(wallet); if (!prev && b.role !== 'dev') await record(this.env, 'join');
@@ -306,7 +310,7 @@ export class Lobby {
         case 'ready': if (!me) return; me.ready = !!b.ready; this.attach(me); return this.pushRoster();
         case 'name': if (!me) return; me.name = String(b.name || '').slice(0, 24) || me.name; this.attach(me); return this.pushRoster();
         case 'policy': if (!me || me.wallet !== this.dev) return; this.policy.waitMs = Math.min(45000, Math.max(1000, Number(b.waitMs) || 8000)); await this.persist(); return this.pushRoster();
-        case 'kick': if (!me || me.wallet !== this.dev) return; { const k = this.members.get(String(b.wallet)); if (k && k.wallet !== this.dev) { try { k.ws?.serializeAttachment({ wallet: null }); k.ws?.close(1000, 'kicked'); } catch {} this.members.delete(k.wallet); this.log('info', k.name + ' was removed'); await this.pushRoster(); } } return;
+        case 'kick': if (!me || me.wallet !== this.dev) return; { const k = this.members.get(String(b.wallet)); if (k && k.wallet !== this.dev) { await this.ctx.storage.put('ban:' + k.wallet, Date.now()); try { k.ws?.serializeAttachment({ wallet: null }); k.ws?.close(1000, 'kicked'); } catch {} this.members.delete(k.wallet); this.log('info', k.name + ' was removed'); await this.pushRoster(); } } return;
         case 'abort': {
           if (!me || me.wallet !== this.dev) return; if (!(await this.launchState())) return;
           await this.clearLaunch(); await this.ctx.storage.deleteAlarm(); this.log('warn', 'launch aborted by the dev'); return this.pushRoster();
@@ -315,6 +319,8 @@ export class Lobby {
           if (!me || me.wallet !== this.dev) return this.send(ws, { t: 'error', msg: 'only the dev can launch' });
           if (await this.launchState()) return this.send(ws, { t: 'error', msg: 'a launch is already in progress' });
           let L;
+          // the official page launches pump.fun coins only (it refuses to sign anything else), so nothing else is accepted
+          if (this.evm) return this.send(ws, { t: 'error', msg: 'Robinhood Chain launches are switched off' });
           if (this.evm && b.escrow) {
             // SAME-BLOCK escrow mode: the dev's single SquadLaunch tx creates the token AND buys for the squad from escrow.
             // Nothing to sign for members — the relay just tracks the receipt and tells everyone.
@@ -340,20 +346,30 @@ export class Lobby {
             { let n = 0; try { n = bs58.decode(String(b.createTx)).length; } catch {} if (!n || n > 1232) return this.send(ws, { t: 'error', msg: 'bad launch transaction' }); }
             // pump.fun: members auto-sign against this template, so it must be THIS launch: create_v2 of the template's mint in
             // the dev's own transaction, and buy accounts derived from that mint (never another, already trading coin)
-            if (b.template?.kind === 'pump') { const bad = checkPumpLaunch(String(b.createTx), b.template, this.dev); if (bad) { this.log('warn', 'launch refused: ' + bad); return this.send(ws, { t: 'error', msg: 'launch refused: ' + bad }); } }
+            if (b.template?.kind !== 'pump') return this.send(ws, { t: 'error', msg: 'launch refused: not a pump.fun launch — reload the arenalaunch page' });
+            const chk = checkPumpLaunch(String(b.createTx), b.template, this.dev); if (chk.err) { this.log('warn', 'launch refused: ' + chk.err); return this.send(ws, { t: 'error', msg: 'launch refused: ' + chk.err }); }
+            const lockUntil = Number(b.template.lockUntil) || 0, nowS = Date.now() / 1000;
+            if (lockUntil && (lockUntil < nowS || lockUntil > nowS + MAX_LOCK_S)) return this.send(ws, { t: 'error', msg: 'launch refused: the lock must end within 7 days of go-live' });
             // the dev's other wallets: each a buy of this coin carrying its 3% launch tax, like a teammate's
             if (b.template?.kind === 'pump' && Array.isArray(b.localTxs)) for (const [i, raw] of b.localTxs.map(String).entries()) {
               let bytes; try { bytes = bs58.decode(raw); } catch { bytes = null; }
               const w = bytes && firstSigner(bytes), bad = !bytes ? 'unreadable' : validatePumpBuy(bytes, { wallet: w, amount: pumpBuyAmount(bytes) }, { template: b.template, dry: !!b.dry });
               if (bad) { this.log('warn', 'launch refused: dev wallet ' + (i + 1) + ' — ' + bad); return this.send(ws, { t: 'error', msg: 'launch refused: dev wallet ' + (i + 1) + ' — ' + bad }); }
             }
+            // what teammates base their minimum tokens on: computed HERE from what was actually signed and what the roster
+            // says, never taken from the dev (a huge number there would let them be sold into at any price)
+            const devLocalLamports = (Array.isArray(b.localTxs) ? b.localTxs : []).reduce((a, raw) => { try { return a + Math.round(pumpBuyAmount(bs58.decode(String(raw))) * 1e9); } catch { return a; } }, 0);
+            b.template.devLamports = chk.devLamports;
+            b.template.plannedLamports = chk.devLamports + devLocalLamports + this.expected().reduce((a, x) => a + Math.round((x.amount + (x.extra?.sol || 0)) * 1e9), 0);
+            delete b.template.feeSplit;
+            this.log('info', 'the dev buys ' + (chk.devLamports / 1e9) + ' SOL in the create' + (devLocalLamports ? ' + ' + (devLocalLamports / 1e9) + ' SOL from their other wallets' : ''));
             // squad fee split: the dev pre-signs pump.fun's fee sharing for the dev + EVERY ready teammate; we send it after the buys
             let feeTx = null, feeSplit = null;
             if (b.feeTx) {
               const want = [this.dev, ...this.expected().map((x) => x.wallet)];
               const r = checkFeeSplit(String(b.feeTx), b.template?.mint, this.dev, want);
               if (r.err) { this.log('warn', 'launch refused: fee split — ' + r.err); return this.send(ws, { t: 'error', msg: 'launch refused: fee split — ' + r.err }); }
-              feeTx = String(b.feeTx); feeSplit = r.holders;
+              feeTx = String(b.feeTx); feeSplit = r.holders; b.template.feeSplit = r.holders; // members are shown what is actually signed
             }
             let devLocks = [];
             if (Array.isArray(b.locks) && b.locks.length) {
@@ -716,6 +732,7 @@ export function checkLock(raw, allowed, L) {
   for (let i = 56; i <= 61; i++) if (d[i]) return { err: 'lock can be cancelled, transferred or topped up' };
   if (d[134] || d[135]) return { err: 'lock can be paused or changed' };
   const want = Number(L.template?.lockUntil) || 0; if (want && cliff < want - 120) return { err: 'unlocks earlier than the lobby\'s lock time' };
+  if (cliff > (want || Date.now() / 1000) + 120 || cliff > Date.now() / 1000 + MAX_LOCK_S) return { err: 'locks for longer than the lobby\'s lock time' };
   return { wallet, until: cliff };
 }
 // pump.fun creator fee sharing (Pump Fees program): create_fee_sharing_config + update_fee_shares(_v2) — the dev pays, the
@@ -746,24 +763,44 @@ export function checkFeeSplit(b58, mint, dev, want) {
   const need = [...new Set(want)].slice(0, 10);
   for (const w of need) if (!got.has(w)) return { err: 'a teammate is missing from the split (' + short(w) + ')' };
   for (const h of holders) if (!need.includes(h.address)) return { err: 'a wallet outside the lobby is in the split (' + short(h.address) + ')' };
+  // equal shares (the page's equalShares: the dev takes the rounding remainder), so nobody is shown one split and signed into another
+  const each = Math.floor(10000 / holders.length);
+  for (const h of holders) if (h.address !== dev && h.bps !== each) return { err: 'shares are not equal' };
   return { holders };
 }
-// the dev's launch: create_v2 of the template's mint (the mint signs it), the dev pays, the template's buy accounts derive from that mint
+// the dev's launch, instruction by instruction: the page builds exactly compute budget + create_v2 of the template's mint +
+// the dev's token account + ONE dev buy (buy_exact_quote_in_v2, its accounts derived from the mint, paid by the dev) + its 3%
+// launch fee + at most one bundle tip. Anything else (a second buy, another program, another signer's transfer) is refused,
+// so the dev cannot slip extra buys ahead of the squad or skip the fee. Returns {devLamports} or {err}.
 export function checkPumpLaunch(createB58, t, dev) {
-  let tx; try { tx = parseTx(bs58.decode(createB58)); } catch { return 'the launch transaction cannot be read'; }
-  if (!t?.mint || !t.creator || !Array.isArray(t.buyKeys)) return 'incomplete template';
-  if (dev && tx.keys[0] !== dev) return 'the launch transaction is not paid by the lobby dev';
-  if (dev && t.creator !== dev) return 'the coin\'s creator is not the lobby dev';
-  const create = tx.ixs.find((ix) => ix.program === PUMP && CREATE_V2.every((b, i) => ix.data[i] === b));
-  if (!create) return 'no pump.fun create_v2 in the launch transaction';
-  const mi = create.idx[0]; if (create.accounts[0] !== t.mint || !(mi < tx.nreq)) return 'the create is for another mint than the template';
-  // the dev buy pays the 3% launch tax in this same transaction
-  const devBuy = tx.ixs.find((ix) => ix.program === PUMP && ix.data.length === 24 && PUMP_BUY_IN.every((b, i) => ix.data[i] === b));
-  if (devBuy) {
-    const taxes = tx.ixs.filter((ix) => isTransfer(ix) && ix.accounts[1] === TREASURY);
-    if (taxes.length !== 1 || taxes[0].accounts[0] !== tx.keys[0] || u64(taxes[0].data, 4) !== launchTax(u64(devBuy.data, 8))) return 'missing the 3% launch fee on the dev buy — reload the arenalaunch page';
+  let tx; try { tx = parseTx(bs58.decode(createB58)); } catch { return { err: 'the launch transaction cannot be read' }; }
+  if (!t?.mint || !t.creator || !Array.isArray(t.buyKeys)) return { err: 'incomplete template' };
+  if (!dev || tx.keys[0] !== dev) return { err: 'the launch transaction is not paid by the lobby dev' };
+  if (t.creator !== dev) return { err: 'the coin\'s creator is not the lobby dev' };
+  if (tx.nreq > 2) return { err: 'the launch transaction has extra signers' };
+  let create = null, buy = null, tax = null, tips = 0;
+  for (const ix of tx.ixs) {
+    if (ix.program === CB) { if (ix.data[0] !== 2 && ix.data[0] !== 3) return { err: 'unexpected compute-budget instruction' }; continue; } // the dev picks their own priority fee
+    if (ix.program === PUMP && CREATE_V2.every((v, i) => ix.data[i] === v)) { if (create) return { err: 'two creates' }; create = ix; continue; }
+    if (ix.program === PUMP && ix.data.length === 24 && PUMP_BUY_IN.every((v, i) => ix.data[i] === v)) { if (buy) return { err: 'more than one buy in the launch transaction' }; buy = ix; continue; }
+    if (ix.program === ATA_PROG) { if (ix.accounts[0] !== dev || ix.accounts[2] !== dev) return { err: 'token account for someone else' }; continue; }
+    if (isTransfer(ix) && ix.accounts[0] === dev) {
+      if (ix.accounts[1] === TREASURY) { if (tax) return { err: 'two launch fees' }; tax = ix; continue; }
+      if (HELIUS_TIPS.has(ix.accounts[1]) && u64(ix.data, 4) <= 100000n && ++tips <= 1) continue;
+    }
+    return { err: 'unexpected instruction in the launch transaction' };
   }
-  return pumpBuyKeysBad(t.buyKeys.map((k) => k.pubkey), t.mint, t.creator, t.creator, !!t.holderReward);
+  if (!create) return { err: 'no pump.fun create_v2 in the launch transaction' };
+  const mi = create.idx[0]; if (create.accounts[0] !== t.mint || !(mi < tx.nreq)) return { err: 'the create is for another mint than the template' };
+  if (!buy) return { err: 'the launch has no dev buy' };
+  const devLamports = u64(buy.data, 8);
+  if (devLamports < 1n || devLamports > 100_000_000_000n) return { err: 'the dev buy must be between 0 and 100 SOL' };
+  // most of the buy's accounts sit in the lookup table and cannot be read here, but its buyer is a signer, and signers are
+  // always written out in full: it must be the dev (the only other signer is the new mint)
+  if (buy.accounts[13] !== dev) return { err: 'the buy in the launch transaction is not the dev\'s' };
+  if (!tax || u64(tax.data, 4) !== launchTax(devLamports)) return { err: 'missing the 3% launch fee on the dev buy — reload the arenalaunch page' };
+  const tk = pumpBuyKeysBad(t.buyKeys.map((k) => k.pubkey), t.mint, t.creator, t.creator, !!t.holderReward); if (tk) return { err: tk };
+  return { devLamports: Number(devLamports) };
 }
 // Compute budget: at most one limit + one price, and a priority fee of at most MAX_PRIO lamports (0.01 SOL) per transaction
 const MAX_PRIO = 10_000_000n, MAX_CU = 1_400_000;

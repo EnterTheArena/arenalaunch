@@ -40,7 +40,9 @@ function report(msg) {
     gateToken().then(() => fetch(Y.relay + '/stats/error', { method: 'POST', headers: { 'content-type': 'application/json', 'x-gate': Y.token }, body: JSON.stringify({ level, where: (/^([a-z][a-z .]{1,20}):/i.exec(msg) || [])[1] || 'page', msg, wallet, lobby, role, ua: browser + mode }) })).catch(() => {});
   } catch {}
 }
-addEventListener('error', (e) => report('page crash: ' + (e.message || 'script error') + (e.filename ? ' @' + String(e.filename).split('/').pop() + ':' + e.lineno : '')));
+// only crashes from our own bundle: wallet extensions inject scripts that throw on their own (e.g. two EVM wallets
+// fighting over window.ethereum) and they are not ours to fix
+addEventListener('error', (e) => { if (!/\/app\.js(\?|$)/.test(String(e.filename || ''))) return; report('page crash: ' + (e.message || 'script error') + (e.filename ? ' @' + String(e.filename).split('/').pop() + ':' + e.lineno : '')); });
 addEventListener('unhandledrejection', (e) => report('page crash: ' + (e.reason?.message || String(e.reason || 'unhandled rejection'))));
 
 // ---------------- RPC (through the site's proxy: public RPCs CORS-block browsers and ad-blockers kill them) ----------------
@@ -157,6 +159,28 @@ async function walletLogin() {
     try { const s = JSON.parse(sessionStorage.getItem('sq_acct')); s.raw = b64(raw); sessionStorage.setItem('sq_acct', JSON.stringify(s)); } catch {}
     log('success', 'saved wallets moved to your arenalaunch sign-in');
   } else await startSession(r, raw);
+}
+// ---------------- email sign-in: emailed code + password ----------------
+// The password is stretched HERE (PBKDF2-SHA256, 600k rounds, salted with the email) and split with HKDF into two keys:
+// AUTH goes to the relay (stored only as an HMAC there) and VAULT encrypts the saved wallets and never leaves this
+// browser. Nobody, the relay included, can reset a forgotten password: the saved wallets go with it.
+const E = { email: null, ticket: null, exists: null };
+async function emailKeys(email, password) {
+  const km = await crypto.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveBits']);
+  const master = new Uint8Array(await crypto.subtle.deriveBits({ name: 'PBKDF2', salt: enc.encode('arenalaunch email v1:' + email), iterations: 600000, hash: 'SHA-256' }, km, 256));
+  const hk = await crypto.subtle.importKey('raw', master, 'HKDF', false, ['deriveBits']);
+  const part = async (info) => new Uint8Array(await crypto.subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(32), info: enc.encode(info) }, hk, 256));
+  return { auth: b64url(await part('arenalaunch auth')), vault: await part('arenalaunch vault') };
+}
+const cleanEmail = (v) => String(v || '').trim().toLowerCase();
+async function emailSend(email) { email = cleanEmail(email); if (!/^[^\s@|]+@[^\s@|]+\.[a-z]{2,}$/.test(email)) throw new Error('enter a valid email address'); const r = await acct('email-start', { email }); E.email = email; E.ticket = r.ticket; E.exists = null; }
+async function emailCheck(code) { const r = await acct('email-check', { email: E.email, ticket: E.ticket, code: String(code).trim() }); E.exists = r.exists; return r.exists; }
+async function emailLogin(code, password, confirm) {
+  if (!E.email) throw new Error('send yourself a code first');
+  if (!E.exists) { if (password.length < 10) throw new Error('use a password of at least 10 characters'); if (password !== confirm) throw new Error('the two passwords do not match'); }
+  const k = await emailKeys(E.email, password);
+  const r = await acct('email-login', { email: E.email, ticket: E.ticket, code: String(code).trim(), auth: k.auth });
+  await startSession(r, k.vault); E.email = null; E.ticket = null; E.exists = null;
 }
 // after a reload: reconnect Phantom silently (it remembers this site) so the sign-in wallet can still sign
 // after a refresh: the signed-in wallet is known (it is the account), so show it at once; attach Phantom silently when it
@@ -455,7 +479,11 @@ function lobbyLeave(silent) { if (Y.ws) { const w = Y.ws; Y.ws = null; try { w.c
 // a teammate's buy: spend exactly my amount; accept anything down to half of what I'd get if I were the last squad buy
 async function memberBuyTx(t, owner, sol, lock = false) {
   const st = await pump(); const mine = lam(sol);
-  const before = Math.max(0, (t.plannedLamports || 0) - mine);
+  // how much is bought ahead of me: never more than the lobby itself adds up to (the dev's buy, as the relay read it from the
+  // signed create, plus every roster buy), so nobody can widen my floor by sending a made-up number
+  const roster = (Y.roster?.members || []).reduce((a, m) => a + lam(Math.min(100, Number(m.amount) || 0) + Math.min(1000, Number(m.extra?.sol) || 0)), 0);
+  const bound = (Number(t.devLamports) || 0) + roster;
+  const before = Math.max(0, Math.min(Number(t.plannedLamports) || 0, bound) - mine);
   const minOut = tokensAt(st, before, mine).muln(lock ? 85 : 50).divn(100);
   const tx = new Transaction({ feePayer: owner, recentBlockhash: t.blockhash });
   // the dev picks the priority fee, but a teammate never pays more than 0.01 SOL of it, nor asks for more than 400k CU
@@ -486,6 +514,9 @@ const buyTipIxs = (t, owner) => { const l = Math.min(BUNDLE_TIP_MAX, Math.max(0,
 // re-derived from the mint (so the buy can only ever be of THIS launch)
 async function checkSignRequest(t) {
   const bad = await templateBad(await pump(), t, Y.roster?.dev || null); if (bad) throw new Error(bad);
+  if (!(Number(t.devLamports) > 0)) throw new Error('the relay did not confirm the dev buy — reload the page');
+  if (Number(t.devLamports) > 100e9) throw new Error('the dev buy is over 100 SOL');
+  if (t.lockUntil && Number(t.lockUntil) > Date.now() / 1000 + 7 * 86400 + 2 * 3600) throw new Error('the dev asked for a lock longer than 7 days');
   const acc = (await getAccounts([t.mint]))[0];
   if (acc) throw new Error('that mint already exists on chain — this is not a new launch');
 }
@@ -501,6 +532,7 @@ async function onLobby(b) {
         if (b.chain === 'rh' || b.template?.kind !== 'pump') throw new Error('this lobby is not a pump.fun launch — update the dev\'s page');
         const amt = Number(Y.amount); if (!(amt > 0 && amt <= 100)) throw new Error('set a buy between 0 and 100 SOL');
         await checkSignRequest(b.template);
+        log('info', 'lobby: the dev buys ' + fsol(Number(b.template.devLamports) / 1e9) + ' SOL ahead of the squad');
         const owner = new PublicKey(address());
         // rehearsal: sign against a made-up blockhash so this signature can never be used for a real buy, even if the relay wanted to
         const canLock = !!b.template.lockUntil; const locks = [];
@@ -865,6 +897,19 @@ function bind() {
   // account
   const amsg = (t, err) => { $('#aMsg').textContent = t; $('#aMsg').className = 'note' + (err ? ' err' : ''); };
   $('#aWallet').onclick = async () => { $('#aWallet').disabled = true; amsg('approve the two signatures in Phantom…'); try { await walletLogin(); amsg(''); } catch (e) { amsg(e.message, true); report('sign-in: ' + e.message); } finally { $('#aWallet').disabled = false; } };
+  // email sign-in: email → code → password (a new account sets one, twice)
+  const em = (step) => { for (const id of ['#eStep1', '#eStep2', '#eStep3']) show(id, id === step); };
+  const busy = async (btn, msg, fn) => { $(btn).disabled = true; amsg(msg); try { await fn(); } catch (e) { amsg(e.message, true); if (e.status !== 401) report('sign-in: ' + e.message); } finally { $(btn).disabled = false; } };
+  $('#aEmail').onclick = () => { show('#emailBox', true); em('#eStep1'); $('#eAddr').focus(); };
+  $('#eSend').onclick = () => busy('#eSend', 'sending a code…', async () => { await emailSend($('#eAddr').value); $('#eSentTo').textContent = E.email; em('#eStep2'); amsg('check your inbox (and spam) for a 6-digit code'); $('#eCode').focus(); });
+  $('#eVerify').onclick = () => busy('#eVerify', 'checking the code…', async () => {
+    const exists = await emailCheck($('#eCode').value); show('#ePw2Row', !exists);
+    $('#ePwNote').textContent = exists ? 'Enter your password.' : 'New account: choose a password (10+ characters). It also locks your saved wallets, so nobody can reset it, us included. If you forget it, your saved wallets are gone. Write it down.';
+    em('#eStep3'); amsg(''); $('#ePw').focus();
+  });
+  $('#eLogin').onclick = () => busy('#eLogin', 'signing in…', async () => { await emailLogin($('#eCode').value, $('#ePw').value, $('#ePw2').value); $('#ePw').value = $('#ePw2').value = $('#eCode').value = ''; show('#emailBox', false); amsg(''); });
+  $('#eBack').onclick = () => { em('#eStep1'); amsg(''); };
+  for (const [inp, btn] of [['#eAddr', '#eSend'], ['#eCode', '#eVerify'], ['#ePw', '#eLogin'], ['#ePw2', '#eLogin']]) $(inp).addEventListener('keydown', (e) => { if (e.key === 'Enter') $(btn).click(); });
   $('#logoutBtn').onclick = async () => { if (A.dirty) await flushVault(); signOut(false); };
   $('#legacyGo').onclick = () => importLegacy($('#legacyPw').value).then(() => { $('#legacyPw').value = ''; render(); refreshBalances(); }).catch((e) => alert(e.message));
   $('#legacySkip').onclick = () => { ls.set('sq_legacy_skip', true); render(); };
