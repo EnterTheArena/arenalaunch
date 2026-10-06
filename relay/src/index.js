@@ -106,7 +106,7 @@ export default {
     useRpc(env);
     const u = new URL(req.url);
     if (req.method === 'OPTIONS') return new Response(null, { headers: cors(env, req) });
-    if (u.pathname === '/health') { let rpc = 'public only'; try { if (env.SOL_RPC_URL) rpc = new URL(env.SOL_RPC_URL).host + ' first'; } catch { rpc = 'SOL_RPC_URL set but not a URL'; } return json({ ok: true, t: Date.now(), gated: !!env.GATE_SECRET, rpc, order: RPCS.map((x) => { try { return new URL(x).host; } catch { return '?'; } }) }); } // hosts only, never the key
+    if (u.pathname === '/health') { let rpc = 'public only'; try { if (env.SOL_RPC_URL) rpc = new URL(env.SOL_RPC_URL).host + ' first'; } catch { rpc = 'SOL_RPC_URL set but not a URL'; } return json({ ok: true, t: Date.now(), gated: !!env.GATE_SECRET, rpc, bundles: (await bundlesAvailable()) ? 'yes' : 'NO — teammates buy one block after the create (needs a Helius plan with sendBundle)', order: RPCS.map((x) => { try { return new URL(x).host; } catch { return '?'; } }) }); } // hosts only, never the key
     if (!originOk(env, req)) return json({ error: 'forbidden origin' }, 403);
     // per-IP attempt limiter for the site's password form (called by the Vercel gate function with a shared key)
     if (req.method === 'POST' && u.pathname === '/ratelimit') {
@@ -536,10 +536,11 @@ export class Lobby {
       const st = (await statusesOf([sig]))?.[0]; if (st) return { st0: st };
       if (Date.now() > end - 2500 + 800 * (resent + 1) && resent < 2) { resent++; heliusBundle(groups[0]).catch(() => {}); }
     }
-    this.log('warn', 'block 0: the bundle was not picked up within 2.5 s — sending the plain way (same transactions, nothing doubles)');
-    const s0 = await sendRaw(createTx); if (!s0) return { st0: null };
-    await Promise.all(buys.map((raw) => sendRaw(raw)));
-    return { st0: await waitProcessed(sig, 20000, 100) };
+    // the buys are NOT sent here: a buy that reaches a leader before the create fails ("the coin does not exist yet"). The
+    // caller sends any buy not already in a landed bundle the moment the create is seen (same signatures: nothing doubles).
+    this.log('warn', 'block 0: the bundle was not picked up within 2.5 s — sending the launch the plain way; the buys follow the moment it lands');
+    const s0 = await sendRaw(createTx); if (!s0) return { st0: null, plain: true };
+    return { st0: await waitProcessed(sig, 20000, 100), plain: true };
   }
 
   async assemble() {
@@ -605,7 +606,9 @@ export class Lobby {
     const names = ordered.map((x) => x.name);
     let sigs = null;
     if (bundled) sigs = buys.map(sigOf);
-    else if (L.fire !== 'safe' && buys.length) { sigs = await Promise.all(buys.map((raw) => sendRaw(raw))); this.log('info', 'block 0: ' + sigs.filter(Boolean).length + '/' + buys.length + ' wallet buys fired with the create'); }
+    // Without a bundle there is no way to make the buys land with the create: sent separately they can reach an earlier
+    // leader and fail before the coin exists (seen live 2026-10-06). So they wait for the create, like Safe.
+    else if (L.fire !== 'safe' && buys.length) this.log('warn', 'block 0 needs a bundle and none went out — the wallet buys go out the moment the create lands (usually the next block)');
     const st0 = bundled?.st0 || await waitProcessed(createSig, 20000, 100);
     if (!st0 || st0.err) {
       this.log('error', st0?.err ? 'the launch transaction FAILED on chain: ' + JSON.stringify(st0.err) + ' (' + createSig + ')' : 'the launch transaction was not processed within 20s — not included (dropped by the network or the blockhash ran out). Nothing charged.');
@@ -620,7 +623,7 @@ export class Lobby {
       if (!sigs) { sigs = await Promise.all(buys.map((raw) => sendRaw(raw))); this.log('info', 'wallet buys sent: ' + sigs.filter(Boolean).length + '/' + buys.length + ' accepted by the RPCs'); }
       else if (bundled) {
         // bundled buys normally land with the create; any not seen ~1 s after it go out the plain way (same signature: lands once at most)
-        await sleep(1000); const seen = await statusesOf(sigs);
+        if (!bundled.plain) await sleep(1000); const seen = await statusesOf(sigs); // after a plain fallback: no wait, the create is in
         const late = buys.map((raw, i) => (seen?.[i] ? null : raw)).filter(Boolean);
         if (late.length) { await Promise.all(late.map((raw) => sendRaw(raw))); this.log('info', late.length + ' buy(s) were not in the bundles — sent the plain way'); }
       }
@@ -898,6 +901,13 @@ export function tipsHelius(b58tx) {
   try { const t = parseTx(bs58.decode(b58tx)); return t.ixs.some((ix) => ix.program === SYSTEM && ix.data.length === 12 && ix.data[0] === 2 && !ix.data[1] && !ix.data[2] && !ix.data[3] && HELIUS_TIPS.has(ix.accounts[1]) && u64(ix.data, 4) >= MIN_BUNDLE_TIP); } catch { return false; }
 }
 export function sigOf(b58tx) { try { return bs58.encode(bs58.decode(b58tx).subarray(1, 65)); } catch { return null; } }
+let BUNDLE_PROBE = { at: 0, ok: null };
+export async function bundlesAvailable() {
+  if (!BUNDLE_URL) return false; if (Date.now() - BUNDLE_PROBE.at < 600000) return BUNDLE_PROBE.ok;
+  // base58 of one byte: not a transaction, so nothing can ever be sent by this probe
+  const r = await heliusBundle(['2']); BUNDLE_PROBE = { at: Date.now(), ok: r.ok || !/not available on your current plan|method not found|unauthorized|forbidden/i.test(r.err || '') };
+  return BUNDLE_PROBE.ok;
+}
 async function heliusBundle(txs) {
   try {
     const r = await fetchT(BUNDLE_URL, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'sendBundle', params: [txs.map((t) => b64(bs58.decode(t))), { encoding: 'base64' }] }) }, 5000);
