@@ -519,22 +519,43 @@ const extraInfo = () => { const ex = mateExtras(); return { n: ex.length, sol: M
 // set the ★ wallet's buy (the dev buy, or your first buy as a member) from the launch card — same rule as the wallets table
 function setMainAmt(v){ const n=Number(v); const a=Number.isFinite(n)&&n>0&&n<=100?n:0; if(V.active.sol==='phantom'){ PH.amount=a; savePH(); } else { const w=activeW(); if(w){ w.amount=a; saveV(); } } sendAmount(); render(); }
 const sendAmount = () => { if (Y.connected && Y.role === 'member') ysend({ t: 'amount', amount: Number(Y.amount) || 0, extra: extraInfo() }); };
-async function lobbyConnect(code, role) {
+// staying in the lobby: a connection that drops on its own (a sleeping tab, a Wi-Fi blip, the relay restarting) rejoins the
+// same lobby in the same seat, with backoff. The relay gives a returning dev their seat back and re-sends a returning
+// teammate the signing request if a launch is in progress. Leaving, being kicked, or opening the lobby in another tab stops it.
+const RJ = { code: null, role: null, tries: 0, timer: null };
+function rejoinLater() {
+  if (!RJ.code || RJ.timer || Y.ws) return;
+  if (RJ.tries >= 30) { log('error', 'lobby: could not get back into ' + RJ.code + ' — join it again'); RJ.code = null; Y.code = null; Y.role = null; render(); return; }
+  const wait = Math.min(15000, 1000 * 2 ** Math.min(RJ.tries, 4)); RJ.tries++;
+  RJ.timer = setTimeout(() => { RJ.timer = null; rejoinNow(); }, wait);
+}
+function rejoinNow() { if (!RJ.code || Y.ws) return; clearTimeout(RJ.timer); RJ.timer = null; lobbyConnect(RJ.code, RJ.role, true).catch(() => rejoinLater()); }
+// back to the tab, or back online: rejoin at once instead of waiting out the backoff
+document.addEventListener('visibilitychange', () => { if (!document.hidden) rejoinNow(); });
+addEventListener('online', () => rejoinNow());
+async function lobbyConnect(code, role, rejoin = false) {
   if (!unlocked()) throw new Error(W.mode === 'phantom' ? 'connect Phantom first' : 'add a wallet first');
-  await gateToken(); lobbyLeave(true);
+  await gateToken();
+  if (rejoin) { if (Y.ws) return; } else { lobbyLeave(true); Object.assign(RJ, { code, role, tries: 0 }); }
   Y.code = code; Y.role = role; render();
   const ws = new WebSocket(Y.relay.replace(/^http/, 'ws') + '/lobby/' + code + '/ws?g=' + encodeURIComponent(Y.token)); Y.ws = ws;
-  ws.onopen = async () => { const ts = Date.now(); const sig = await signMessage(enc.encode('pumpcall-lobby:' + code + ':' + ts)); ysend({ t: 'hello', wallet: address(), name: Y.name || short(address()), sig, ts, role, amount: role === 'member' ? Number(Y.amount) || 0 : 0, extra: role === 'member' ? extraInfo() : null, ready: role === 'member' }); };
+  // keep-alive: the relay answers 'ping' with 'pong' without waking the lobby; idle connections stay open
+  let ping = null;
+  ws.onopen = async () => { ping = setInterval(() => { try { if (ws.readyState === 1) ws.send('ping'); } catch {} }, 20000); const ts = Date.now(); const sig = await signMessage(enc.encode('pumpcall-lobby:' + code + ':' + ts)); ysend({ t: 'hello', wallet: address(), name: Y.name || short(address()), sig, ts, role, amount: role === 'member' ? Number(Y.amount) || 0 : 0, extra: role === 'member' ? extraInfo() : null, ready: role === 'member' }); };
   ws.onmessage = (e) => { let b; try { b = JSON.parse(e.data); } catch { return; } onLobby(b).catch((err) => log('error', 'lobby: ' + err.message)); };
   ws.onclose = (e) => {
+    clearInterval(ping);
     if (Y.ws !== ws) return; const joined = Y.connected; Y.ws = null; Y.connected = false;
-    // never got in: almost always a mistyped code or a lobby that no longer exists (the relay refuses unknown codes)
-    if (!joined && e.code === 1006) { log('error', 'lobby: could not join ' + code + ' — check the code (it may be mistyped, or the lobby no longer exists)'); Y.code = null; Y.role = null; render(); return; }
-    log('warn', 'lobby: disconnected (' + e.code + (e.reason ? ' ' + e.reason : '') + ')'); if (e.reason === 'kicked') { Y.code = null; Y.role = null; } render();
+    // kicked, or the same wallet opened this lobby in another tab: stay out (rejoining would fight the other tab)
+    if (e.reason === 'kicked' || e.reason === 'replaced') { RJ.code = null; log('warn', 'lobby: ' + (e.reason === 'kicked' ? 'the dev removed you' : 'opened in another tab — this one left')); if (e.reason === 'kicked') { Y.code = null; Y.role = null; } render(); return; }
+    // never got in on a first try: almost always a mistyped code or a lobby that no longer exists (the relay refuses unknown codes)
+    if (!joined && e.code === 1006 && !rejoin) { RJ.code = null; log('error', 'lobby: could not join ' + code + ' — check the code (it may be mistyped, or the lobby no longer exists)'); Y.code = null; Y.role = null; render(); return; }
+    if (RJ.code) { if (joined) log('warn', 'lobby: connection lost (' + e.code + ') — rejoining ' + code + '…'); render(); rejoinLater(); return; }
+    log('warn', 'lobby: disconnected (' + e.code + (e.reason ? ' ' + e.reason : '') + ')'); render();
   };
-  ws.onerror = () => { if (Y.ws === ws && Y.connected) log('error', 'lobby: relay connection failed'); };
+  ws.onerror = () => {}; // onclose follows and handles it (rejoin, or the reason)
 }
-function lobbyLeave(silent) { if (Y.ws) { const w = Y.ws; Y.ws = null; try { w.close(1000, 'leave'); } catch {} } Object.assign(Y, { connected: false, code: null, role: null, roster: null, phase: 'idle' }); if (!silent) { log('info', 'lobby: left'); render(); } }
+function lobbyLeave(silent) { RJ.code = null; clearTimeout(RJ.timer); RJ.timer = null; if (Y.ws) { const w = Y.ws; Y.ws = null; try { w.close(1000, 'leave'); } catch {} } Object.assign(Y, { connected: false, code: null, role: null, roster: null, phase: 'idle' }); if (!silent) { log('info', 'lobby: left'); render(); } }
 // a teammate's buy: spend exactly my amount; accept anything down to half of what I'd get if I were the last squad buy
 async function memberBuyTx(t, owner, sol, lock = false) {
   const st = await pump(); const mine = lam(sol);
@@ -583,7 +604,7 @@ async function checkSignRequest(t) {
 }
 async function onLobby(b) {
   switch (b.t) {
-    case 'roster': if (!Y.connected) { if (b.you !== address()) return; Y.connected = true; log('success', 'lobby ' + b.code + ' — joined as ' + Y.role); } Y.roster = b; Y.phase = b.phase || 'idle'; if (b.phase === 'launching' && b.fireAt && !CD.at) { CD.at = b.fireAt; CD.mint = b.mint || null; CD.live = null; CD.sent = false; tick(); } render(); return;
+    case 'roster': if (!Y.connected) { if (b.you !== address()) return; Y.connected = true; log('success', 'lobby ' + b.code + (RJ.tries ? ' — back in as ' : ' — joined as ') + Y.role); RJ.tries = 0; } Y.roster = b; Y.phase = b.phase || 'idle'; if (b.phase === 'launching' && b.fireAt && !CD.at) { CD.at = b.fireAt; CD.mint = b.mint || null; CD.live = null; CD.sent = false; tick(); } render(); return;
     case 'log': log(b.kind === 'armed' ? 'armed' : b.kind || 'info', 'lobby: ' + b.msg, true); return; // the relay already reported its own errors
     case 'countdown': if (b.sent) { CD.sent = true; if (!CD.at) CD.at = Date.now(); CD.mint = b.mint || CD.mint; tick(); } return;
     case 'error': log('error', 'lobby: ' + b.msg); if (!Y.connected) lobbyLeave(true); else if (Y.role === 'dev' && (CD.handed || Y.phase === 'launching')) { cdReset(false); Y.phase = 'idle'; alert('Launch stopped — ' + b.msg); } render(); return;

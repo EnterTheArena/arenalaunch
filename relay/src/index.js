@@ -237,6 +237,8 @@ export class RateLimit {
 export class Lobby {
   constructor(ctx, env) {
     useRpc(env); this.ctx = ctx; this.env = env;
+    // keep-alive: pages send 'ping' every 20 s; Cloudflare answers 'pong' without waking this object (no cost, no state)
+    try { this.ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('ping', 'pong')); } catch {}
     this.code = null; this.dev = null; this.policy = { waitMs: 8000 }; this.chain = 'sol';
     this.members = new Map(); // wallet -> { wallet, name, amount, ready, role, ws }
     this.ctx.blockConcurrencyWhile(async () => { const s = await this.ctx.storage.get('meta'); if (s) { this.code = s.code; this.dev = s.dev; this.policy = s.policy || this.policy; this.chain = s.chain || 'sol'; } });
