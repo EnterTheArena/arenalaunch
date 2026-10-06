@@ -3,7 +3,7 @@
 // Husher are stand-ins. No network.   node tools/husher-fee-check.mjs   (from site/)
 import { Accounts, readSession } from '../../relay/src/accounts.js';
 import worker, { Claims } from '../../relay/src/index.js';
-import { TREASURY, husherFee } from '../src/fees.js';
+import { TREASURY, husherFee } from '../api/_fees.js';
 
 let fails = 0; const ok = (c, w) => { console.log((c ? 'ok   ' : 'FAIL ') + w); if (!c) fails++; };
 process.env.ACCOUNT_SECRET = 'acct'; process.env.HUSHER_KEY = 'hk'; process.env.RL_KEY = 'rl'; process.env.SOL_RPC_URL = 'https://rpc.test/';

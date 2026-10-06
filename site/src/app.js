@@ -7,7 +7,7 @@ import bs58 from 'bs58';
 import BN from 'bn.js';
 import { lockIx, LOCK_FEE_SOL, LOCK_FEE_PCT } from './lock.js';
 import { pumpState, buildCreate, buyIxsFor, tokensFor, tokensAt, altKeysOf, signersOf, templateBad, feeSplitIxs, equalShares, TREASURY, LAUNCH_TAX_BPS, HUSHER_TAX_BPS, launchTaxIx } from './pump.js';
-import { husherFee } from './fees.js';
+import { husherFee } from '../api/_fees.js';
 import { vaultKey } from './vault.js';
 
 const $ = (s) => document.querySelector(s);

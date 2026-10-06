@@ -20,8 +20,8 @@ export const BUY_USER = { user: 13, baseAta: 14, quoteAta: 15, uva: 20, uvaAta: 
 
 // arenalaunch fees, paid to the treasury: 3% on top of every launch buy (inside that buy's own transaction, so a buy that
 // fails pays nothing — the relay refuses buys without it) and 2% of every private (Husher) transfer
-import { TREASURY, LAUNCH_TAX_BPS } from './fees.js';
-export { TREASURY, LAUNCH_TAX_BPS, HUSHER_TAX_BPS } from './fees.js';
+import { TREASURY, LAUNCH_TAX_BPS } from '../api/_fees.js';
+export { TREASURY, LAUNCH_TAX_BPS, HUSHER_TAX_BPS } from '../api/_fees.js';
 export const launchTax = (lamports) => Number((BigInt(Math.round(lamports)) * BigInt(LAUNCH_TAX_BPS)) / 10000n);
 export const launchTaxIx = (from, buyLamports) => SystemProgram.transfer({ fromPubkey: new PublicKey(from), toPubkey: new PublicKey(TREASURY), lamports: launchTax(buyLamports) });
 

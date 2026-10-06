@@ -1,6 +1,6 @@
 import { limited, ipOf } from './_limit.js';
 import { signedIn } from './_session.js';
-import { TREASURY, husherFeeOk } from '../src/fees.js';
+import { TREASURY, husherFeeOk } from './_fees.js';
 
 // POST /api/husher — Husher private-transfer proxy (the API key never reaches the browser).
 // Body: { action: 'estimate'|'create'|'status', ... }
