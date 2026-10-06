@@ -264,6 +264,7 @@
   .logline{display:grid;grid-template-columns:64px minmax(0,1fr);gap:10px;padding:6px 0;border-bottom:1px solid var(--line)}
   .logline:last-child{border-bottom:0}
   .logline .ts{color:var(--dim)} .logline .m{white-space:pre-wrap;word-break:break-word;color:var(--ink2)}
+  .phwarn{background:var(--warnbg);color:var(--warn);border:1px solid rgba(255,181,71,.35);border-radius:12px;padding:10px 12px;font-size:13px;line-height:1.5;margin-top:10px}
   .k-success .m{color:var(--ok)} .k-error .m{color:var(--err)} .k-warn .m{color:var(--warn)} .k-armed .m{color:var(--acc);font-weight:600}
   .foot{display:flex;align-items:center;justify-content:center;gap:10px;flex-wrap:wrap;font-size:12.5px;color:var(--dim);padding:40px 0 44px;text-align:center}
   .foot i{width:4px;height:4px;border-radius:50%;background:var(--dim);display:inline-block}
@@ -411,6 +412,7 @@
         </table></div>
         <div class="wsum" id="wSum"></div>
         <div class="note" id="vState" style="padding:0 22px 10px;margin:0"></div>
+        <div class="phwarn hide" id="phWarn2" role="note" style="margin:0 22px 12px"></div>
         <div class="drawer hide" id="vManage">
           <div class="ttl" id="vmName"></div>
           <div class="row" style="margin:0"><div class="f xs"><button class="btn sm" id="vmExport">Back up (show key)</button></div><div class="f xs"><button class="btn ghost sm" id="vmClear">hide</button></div><div class="f xs"><button class="btn ghost sm danger" id="vmRemove">Remove wallet</button></div></div>
@@ -533,6 +535,7 @@
             </table>
             <div class="fire"><button class="btn" id="lRehearse">Rehearse</button><span class="help" tabindex="0" role="note" aria-label="What is a rehearsal?" data-tip="A rehearsal is a full dry run: it uploads your image, builds and signs the launch, and every ready teammate signs their buys — then stops. Nothing is sent to the chain and no SOL is spent; every rehearsal signature is made unusable on purpose.">?</span><button class="go" id="lFire">Launch</button></div>
             <div class="why" id="lWhy"></div>
+            <div class="phwarn hide" id="phWarn" role="note"></div>
           </div>
         </div>
       </aside>

@@ -916,6 +916,11 @@ function render() {
   const why = !unlocked() ? 'Unlock a wallet first.' : !Y.connected ? 'Open or join a lobby.' : Y.role !== 'dev' ? 'Only the dev launches. Tick ready and keep this tab open.' : !L.name.trim() || !L.symbol.trim() ? 'Name and ticker are missing.' : !LOGO ? 'Choose an image.' : !(Number(L.devBuySol) > 0) ? 'Set a dev buy.' : '';
   $('#lWhy').textContent = launching ? 'launching…' : why;
   $('#lFire').disabled = launching || !!why; $('#lRehearse').disabled = launching || !!why;
+  // Phantom signs through pop-ups: fine for signing in and deposits, slow in a launch, so say so where it matters
+  const phStar = W.mode === 'phantom', phBuy = !phStar && extraWallets().some((w) => w.id === 'phantom');
+  const phMsg = phStar ? (Y.role === 'member' ? 'Phantom is your ★ wallet, so Phantom will ask you to approve your buy during the launch, against the clock.' : 'Phantom is your ★ wallet, so Phantom will ask you to approve 3 to 4 times during the launch (lookup table, create, any lock), against the clock.') + ' For an instant launch with no pop-ups, put the ★ on a saved wallet in Wallets and fund it with Deposit from Phantom.'
+    : phBuy ? 'Phantom is ticked as a buyer, so Phantom will ask you to approve its buy during the launch. Untick it in Wallets for an instant launch.' : '';
+  for (const id of ['#phWarn', '#phWarn2']) { $(id).textContent = phMsg; show(id, !!phMsg && !!A.key); }
   $('#lFire').textContent = launching ? 'Launching…' : 'Launch' + (devHere ? ' · ' + (1 + mine.length + teamN) + (mine.length + teamN ? ' wallets' : ' wallet') : '');
   // callouts
   const ok = pumpOk();
