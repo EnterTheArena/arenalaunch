@@ -8,6 +8,7 @@ import BN from 'bn.js';
 import { lockIx, LOCK_FEE_SOL, LOCK_FEE_PCT } from './lock.js';
 import { pumpState, buildCreate, buyIxsFor, tokensFor, tokensAt, altKeysOf, signersOf, templateBad, feeSplitIxs, equalShares, TREASURY, LAUNCH_TAX_BPS, HUSHER_TAX_BPS, launchTaxIx } from './pump.js';
 import { husherFee } from './fees.js';
+import { vaultKey } from './vault.js';
 
 const $ = (s) => document.querySelector(s);
 const short = (a) => (a && a.length > 12 ? a.slice(0, 4) + '…' + a.slice(-4) : a || '');
@@ -75,7 +76,7 @@ async function sendAndConfirm(tx, ms = 60000) {
 // deterministic, so the same wallet always unlocks the same vault). The key never leaves this browser.
 const b64 = (u8) => btoa(String.fromCharCode(...u8)), unb64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
 const b64url = (u8) => b64(u8).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-const A = { session: null, id: null, kind: null, name: null, key: null, keyRaw: null, ver: 0, saving: null, dirty: false };
+const A = { session: null, id: null, kind: null, name: null, key: null, ver: 0, saving: null, dirty: false };
 const VAULT_MSG = (addr) => 'arenalaunch: unlock my saved wallets\n' + addr + '\n\nSigning this does not move funds. Only sign it on arenalaunch.';
 // accounts made before the rename were sealed with this message; they are re-sealed under the new one on first sign-in
 const OLD_VAULT_MSG = (addr) => 'squadlaunch: unlock my saved wallets\n' + addr + '\n\nSigning this does not move funds. Only sign it on squadlaunch.';
@@ -86,10 +87,29 @@ async function acct(op, body) {
   const j = await r.json().catch(() => ({})); if (!r.ok) { const e = new Error(j.error || 'account server error ' + r.status); e.status = r.status; e.body = j; throw e; } return j;
 }
 const importKey = (raw) => crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt', 'decrypt']);
+const unb64url = (s) => unb64(String(s).replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((String(s).length + 3) % 4));
 async function sealVault(obj) { const iv = crypto.getRandomValues(new Uint8Array(12)); const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, A.key, enc.encode(JSON.stringify(obj)))); return 'v1.' + b64(iv) + '.' + b64(ct); }
 async function openVault(blob) { const [, iv, ct] = blob.split('.'); return JSON.parse(new TextDecoder().decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(iv) }, A.key, unb64(ct)))); }
+// ---- the vault key across a reload of this tab ----
+// The key is kept as a NON-EXTRACTABLE CryptoKey in IndexedDB (its id in sessionStorage): page scripts can use it while
+// this tab is signed in, but its bytes can never be read back or copied out of the browser. Gone at sign-out, and any key
+// not used for 2 days is pruned (that tab then signs in again).
+const KS_IDLE_MS = 2 * 86400000;
+const ksDb = () => new Promise((res, rej) => { const q = indexedDB.open('arenalaunch-keys', 1); q.onupgradeneeded = () => q.result.createObjectStore('k'); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); });
+async function ks(mode, fn) { const db = await ksDb(); try { return await new Promise((res, rej) => { const t = db.transaction('k', mode); const out = fn(t.objectStore('k')); t.oncomplete = () => res(out?.result); t.onerror = () => rej(t.error); }); } finally { db.close(); } }
+const ksPut = (id, key) => ks('readwrite', (st) => st.put({ key, at: Date.now() }, id)).catch(() => {});
+async function ksGet(id) { try { const rec = await ks('readonly', (st) => st.get(id)); if (!rec?.key || Date.now() - rec.at > KS_IDLE_MS) return null; await ksPut(id, rec.key); return rec.key; } catch { return null; } }
+const ksDel = (id) => ks('readwrite', (st) => st.delete(id)).catch(() => {});
+const ksPrune = () => ks('readwrite', (st) => { const c = st.openCursor(); c.onsuccess = () => { const cur = c.result; if (!cur) return; if (!(Date.now() - (cur.value?.at || 0) < KS_IDLE_MS)) cur.delete(); cur.continue(); }; }).catch(() => {});
+const tabState = () => { try { return JSON.parse(sessionStorage.getItem('sq_acct') || 'null'); } catch { return null; } };
+async function rememberTab(vault) {
+  const kid = tabState()?.kid || b64url(crypto.getRandomValues(new Uint8Array(12)));
+  await ksPut(kid, A.key);
+  try { sessionStorage.setItem('sq_acct', JSON.stringify({ session: A.session, id: A.id, kind: A.kind, ver: A.ver, kid, vault: vault ?? null })); } catch {}
+}
+// raw: key bytes (sign-in) or a CryptoKey (resume)
 async function startSession(r, raw) {
-  A.session = r.session; A.id = r.id; A.kind = r.kind; A.name = r.id.slice(2); A.keyRaw = raw; A.key = await importKey(raw); A.ver = r.ver || 0;
+  A.session = r.session; A.id = r.id; A.kind = r.kind; A.name = r.id.slice(2); A.key = raw instanceof CryptoKey ? raw : await importKey(raw); A.ver = r.ver || 0;
   let data = { wallets: [], active: null };
   if (r.vault) { try { data = await openVault(r.vault); } catch { signOut(true); throw new Error(A.kind === 'wallet' ? 'this wallet could not unlock its saved wallets' : 'wrong password'); } }
   V.all = []; V.keys.clear(); V.raw = [];
@@ -97,7 +117,7 @@ async function startSession(r, raw) {
   if (V.raw.length) log('warn', V.raw.length + ' saved wallet entr' + (V.raw.length === 1 ? 'y' : 'ies') + ' could not be read here — kept in your account untouched');
   V.active.sol = data.active === 'phantom' || V.all.some((w) => w.id === data.active) ? data.active : (V.all[0] || {}).id || null;
   if (!V.all.length && !V.raw.length) { addWallet('launch wallet', Keypair.generate()); A.dirty = true; setTimeout(flushVault, 0); log('success', 'made your launch wallet ' + V.all[0].address + ' — fund it with “Deposit from Phantom” in 01'); }
-  try { sessionStorage.setItem('sq_acct', JSON.stringify({ session: A.session, id: A.id, kind: A.kind, ver: A.ver, raw: b64(raw), vault: r.vault || null })); } catch {}
+  await rememberTab(r.vault || null);
   document.body.classList.remove('out');
   log('success', 'signed in as ' + (A.kind === 'wallet' ? short(A.name) : A.name) + ' · ' + V.all.length + ' saved wallet' + (V.all.length === 1 ? '' : 's'));
   render(); refreshBalances();
@@ -150,18 +170,23 @@ async function walletLogin() {
     message = enc.encode(siwsText(again, addr)); sig = (await p.signMessage(message, 'utf8')).signature;
     r = await acct('wallet', { address: addr, message: bs58.encode(message), sig: bs58.encode(sig) });
   }
-  const keyFrom = async (msg) => { const s = (await p.signMessage(enc.encode(msg), 'utf8')).signature; if (!ed25519.verify(s, enc.encode(msg), bs58.decode(addr))) throw new Error('the wallet returned an invalid signature'); return new Uint8Array(await crypto.subtle.digest('SHA-256', s)); };
-  const raw = await keyFrom(VAULT_MSG(addr));
+  const sigOf = async (msg) => { const s = (await p.signMessage(enc.encode(msg), 'utf8')).signature; if (!ed25519.verify(s, enc.encode(msg), bs58.decode(addr))) throw new Error('the wallet returned an invalid signature'); return s; };
+  // the vault key = SHA-256(signature over the fixed unlock message || the account's pepper). The relay hands the pepper
+  // out only with a fresh sign-in, so a phished unlock signature plus a stolen session cannot open the vault.
+  const vsig = await sigOf(VAULT_MSG(addr)); const pepper = r.pepper ? unb64url(r.pepper) : null;
+  const raw = await vaultKey(vsig, pepper);
   W.phantom = p; W.phantomPk = addr;
   if (r.vault && !(await canOpen(r.vault, raw))) {
-    // saved before the rename: unlock with the old message once, then re-seal under the new key
-    log('warn', 'your saved wallets are from before the rename — approve one more signature in Phantom to move them over');
-    const old = await keyFrom(OLD_VAULT_MSG(addr));
-    if (!(await canOpen(r.vault, old))) throw new Error('this wallet could not unlock its saved wallets');
-    await startSession(r, old);
-    A.keyRaw = raw; A.key = await importKey(raw); A.dirty = true; await flushVault();
-    try { const s = JSON.parse(sessionStorage.getItem('sq_acct')); s.raw = b64(raw); sessionStorage.setItem('sq_acct', JSON.stringify(s)); } catch {}
-    log('success', 'saved wallets moved to your arenalaunch sign-in');
+    // sealed under an older key: the same signature without the pepper (before this change), or the pre-rename message
+    let from = pepper && (await canOpen(r.vault, await vaultKey(vsig))) ? await vaultKey(vsig) : null;
+    if (!from) {
+      log('warn', 'your saved wallets are from before the rename — approve one more signature in Phantom to move them over');
+      const old = await vaultKey(await sigOf(OLD_VAULT_MSG(addr))); if (await canOpen(r.vault, old)) from = old;
+    }
+    if (!from) throw new Error('this wallet could not unlock its saved wallets');
+    await startSession(r, from);
+    A.key = await importKey(raw); A.dirty = true; await flushVault(); await rememberTab(tabState()?.vault); // re-sealed under the new key
+    log('success', 'saved wallets re-sealed under your new sign-in key');
   } else await startSession(r, raw);
 }
 // ---------------- email sign-in: emailed code + password ----------------
@@ -191,15 +216,19 @@ async function emailLogin(code, password, confirm) {
 // appears (extensions inject a moment after the page). Anything that needs a signature connects on demand (ensurePhantom).
 async function reconnect(addr) { W.phantomPk = W.phantomPk || addr; render(); let p = null; for (let i = 0; i < 15 && !(p = injected()); i++) await new Promise((res) => setTimeout(res, 200)); if (!p) return; try { await p.connect({ onlyIfTrusted: true }); } catch { return; } if (p.publicKey?.toBase58() === addr) { W.phantom = p; W.phantomPk = addr; render(); } }
 function signOut(quiet) {
-  clearTimeout(saveTimer); Object.assign(A, { session: null, id: null, kind: null, name: null, key: null, keyRaw: null, ver: 0, dirty: false });
+  clearTimeout(saveTimer); Object.assign(A, { session: null, id: null, kind: null, name: null, key: null, ver: 0, dirty: false });
+  const kid = tabState()?.kid; if (kid) ksDel(kid);
   V.all = []; V.keys.clear(); V.raw = []; V.sel = null; V.active.sol = null; try { sessionStorage.removeItem('sq_acct'); } catch {} W.phantomPk = null; W.phantom = null;
   if (Y.code) lobbyLeave(true);
   document.body.classList.add('out'); if (!quiet) log('info', 'signed out'); render();
 }
 // survive a reload of this tab (sessionStorage dies with the tab)
 async function resume() {
-  let s; try { s = JSON.parse(sessionStorage.getItem('sq_acct') || 'null'); } catch {} if (!s?.session) return;
-  try { const r = await acct('vault', { session: s.session }); await startSession({ session: s.session, id: s.id, kind: s.kind, ver: r.ver, vault: r.vault }, unb64(s.raw)); if (A.kind === 'wallet') reconnect(A.name); }
+  ksPrune(); const s = tabState(); if (!s?.session) return;
+  // the key from this tab's key store (a tab from before this change still has raw bytes: used once, then moved over)
+  const key = s.kid ? await ksGet(s.kid) : s.raw ? await importKey(unb64(s.raw)) : null;
+  if (!key) { try { sessionStorage.removeItem('sq_acct'); } catch {} log('info', 'sign in again to unlock your saved wallets'); return; }
+  try { const r = await acct('vault', { session: s.session }); await startSession({ session: s.session, id: s.id, kind: s.kind, ver: r.ver, vault: r.vault }, key); if (A.kind === 'wallet') reconnect(A.name); }
   catch (e) { if (e.status === 401) { try { sessionStorage.removeItem('sq_acct'); } catch {} log('info', 'session expired — sign in again'); } else log('warn', 'could not restore your session: ' + e.message); }
 }
 

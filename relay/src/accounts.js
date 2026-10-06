@@ -104,7 +104,7 @@ async function prune(S) {
   const now = Date.now(); const cur = (await S.get('prunecur')) || 'w:';
   const page = await S.list({ prefix: 'w:', start: cur, limit: 40 }); let last = null;
   for (const [k, rec] of page) { last = k; if (!rec.vault && now - (rec.seen || rec.created || 0) > ABANDONED_MS) { await S.delete(k); await adjustSum(S, k, rec, null); } }
-  await S.put('prunecur', page.size < 40 || !last ? 'w:' : last + ' ');
+  await S.put('prunecur', page.size < 40 || !last ? 'w:' : last + '\0');
   for (const [k, q] of await S.list({ prefix: 'q:', limit: 40 })) if (!(q.sends || []).some((t) => now - t < 3600000)) await S.delete(k);
   for (const [k, c] of await S.list({ prefix: 'c:', limit: 40 })) if (now > c.exp) await S.delete(k);
 }
@@ -115,7 +115,7 @@ export class Accounts {
   async fetch(req) {
     const op = new URL(req.url).pathname.slice(1); const b = await req.json().catch(() => ({}));
     const S = this.ctx.storage; const out = (o, s = 200) => new Response(JSON.stringify(o), { status: s, headers: { 'content-type': 'application/json' } });
-    const view = async (id, rec) => out({ session: await mintSession(this.env, id), id, kind: rec.kind, vault: rec.vault || null, ver: rec.ver || 0 });
+    const view = async (id, rec, extra = {}) => out({ session: await mintSession(this.env, id), id, kind: rec.kind, vault: rec.vault || null, ver: rec.ver || 0, ...extra });
 
     if (op === 'nonce') return out({ nonce: await newNonce(this.env) });
     if (op === 'wallet') {
@@ -138,9 +138,13 @@ export class Accounts {
       const id = 'w:' + a; let rec = await S.get(id);
       const isNew = !rec; if (!rec) { rec = { kind: 'wallet', name: a, vault: null, ver: 0, created: Date.now() }; await S.put(id, rec); await adjustSum(S, id, null, rec); }
       else if (!rec.vault) { rec.seen = Date.now(); await S.put(id, rec); } // nothing saved yet: keep it off the prune list while it is used
+      // the vault pepper: random, per account, handed out ONLY here, right after a fresh Sign In With Solana. The vault key
+      // is SHA-256(signature over the fixed unlock message || pepper), so a phished unlock signature plus a stolen session
+      // (which can read the vault blob) still cannot open it.
+      if (!rec.pepper) { rec.pepper = b64u(crypto.getRandomValues(new Uint8Array(32))); await S.put(id, rec); }
       await prune(S);
       await record(this.env, 'signin', { isNew });
-      return view(id, rec);
+      return view(id, rec, { pepper: rec.pepper });
     }
     if (op === 'email-start' || op === 'email-check' || op === 'email-login') {
       const email = cleanEmail(b.email); if (!email) return out({ error: 'enter a valid email address' }, 400);
