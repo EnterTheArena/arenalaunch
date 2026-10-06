@@ -1,7 +1,7 @@
 // The relay's HTTP rules, run against the real worker with in-memory Durable Objects. No network.
 //   node tools/relay-http-check.mjs   (from site/)
 import worker, { Stats, Accounts } from '../../relay/src/index.js';
-import { readSiws } from '../../relay/src/accounts.js';
+import { readSiws, mintSession } from '../../relay/src/accounts.js';
 import { mintToken } from '../api/gate.js';
 
 let fails = 0; const ok = (c, what) => { console.log((c ? 'ok   ' : 'FAIL ') + what); if (!c) fails++; };
@@ -22,7 +22,7 @@ export function memStorage() {
   };
 }
 const ns = (Cls, envRef) => { const objs = new Map(); return { idFromName: (n) => n, get: (id) => { if (!objs.has(id)) { const inst = new Cls({ storage: memStorage(), waitUntil: () => {}, blockConcurrencyWhile: (f) => f() }, envRef.env); objs.set(id, { inst, fetch: (u, init) => inst.fetch(u instanceof Request ? u : new Request(u, init)) }); } return objs.get(id); } }; };
-class FakeRL { constructor(ctx) { this.n = new Map(); } async fetch(req) { const b = await req.json(); return Response.json({ allowed: true }); } }
+class FakeRL { constructor() { this.n = 0; } async fetch(req) { const b = await req.json(); if (new URL(req.url).pathname !== '/count') return Response.json({ allowed: true }); this.n++; return Response.json({ allowed: this.n <= b.limit, n: this.n }); } }
 export function makeEnv(extra = {}) {
   const ref = {}; const env = { GATE_SECRET: 'gate-secret', ACCOUNT_SECRET: 'acct-secret', RL_KEY: 'rl-key', ALLOWED_ORIGINS: 'https://arenalaunch.bond,https://www.arenalaunch.bond', ...extra };
   ref.env = env; env.STATS = ns(Stats, ref); env.ACCOUNTS = ns(Accounts, ref); env.RATELIMIT = ns(FakeRL, ref); return env;
@@ -52,6 +52,21 @@ r = await worker.fetch(req('/account/nonce', { method: 'OPTIONS', origin: SITE }
 ok(r.headers.get('access-control-allow-origin') === SITE, 'CORS reflects our own origin');
 const siws = (d) => d + ' wants you to sign in with your Solana account:\n11111111111111111111111111111111\n\nx\n\nNonce: n\nIssued At: ' + new Date().toISOString();
 ok(readSiws(env, siws('localhost:5182'), '11111111111111111111111111111111').error && !readSiws(env, siws('arenalaunch.bond'), '11111111111111111111111111111111').error, 'a sign-in message for localhost is refused in production');
+
+// ---- the owner's problems list: signed-in accounts only, short, limited ----
+const errors = async (e) => (await (await e.STATS.get('all').fetch('https://stats/summary')).json()).errors;
+const sess = await mintSession(env, 'w:11111111111111111111111111111112');
+r = await worker.fetch(req('/stats/error', { headers: { 'x-gate': gate }, body: { msg: 'spam' } }), env);
+ok(r.status === 401 && !(await errors(env)).length, '/stats/error with no session: 401, nothing recorded');
+r = await worker.fetch(req('/stats/error', { headers: { 'x-gate': gate, 'x-session': sess.slice(0, -3) + 'abc' }, body: { msg: 'spam' } }), env);
+ok(r.status === 401, '/stats/error with a forged session: 401');
+r = await worker.fetch(req('/stats/error', { headers: { 'x-gate': gate, 'x-session': sess }, body: { msg: 'x'.repeat(3000) } }), env);
+ok(r.status === 413 && !(await errors(env)).length, '/stats/error refuses an oversized body');
+r = await worker.fetch(req('/stats/error', { headers: { 'x-gate': gate, 'x-session': sess }, body: { msg: 'launch: it broke', where: 'launch' } }), env);
+const got = await errors(env);
+ok(r.status === 200 && got.length === 1 && got[0].account === 'w:11111111111111111111111111111112', 'a signed-in report is recorded with its account');
+let codes = []; for (let i = 0; i < 20; i++) codes.push((await worker.fetch(req('/stats/error', { headers: { 'x-gate': gate, 'x-session': sess }, body: { msg: 'n' + i } }), env)).status);
+ok(codes.filter((c) => c === 200).length === 18 && codes.slice(18).every((c) => c === 429), 'one account gets 20 reports per 10 minutes (2 used above), then 429');
 
 export const done = () => { console.log(fails ? fails + ' FAILED' : 'all relay http checks passed'); process.exit(fails ? 1 : 0); };
 export { ok, req, gate, env, SITE };

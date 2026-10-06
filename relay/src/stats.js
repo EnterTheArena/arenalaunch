@@ -35,7 +35,7 @@ export class Stats {
         case 'error': {
           // the owner's problems list: what went wrong, where, for which wallet / lobby. The same message from the same
           // lobby (every member's page reports a relay error it was shown) within 2 minutes is counted, not repeated.
-          const e = { src: b.src === 'relay' ? 'relay' : 'site', level: b.level === 'warn' ? 'warn' : 'error', where: String(b.where || '').slice(0, 40), msg: String(b.msg || '').slice(0, 400), wallet: /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(b.wallet || '') ? b.wallet : null, lobby: /^[A-Z2-9]{6}$/.test(b.lobby || '') ? b.lobby : null, ua: String(b.ua || '').slice(0, 60) || null, role: ['dev', 'member'].includes(b.role) ? b.role : null };
+          const e = { src: b.src === 'relay' ? 'relay' : 'site', level: b.level === 'warn' ? 'warn' : 'error', where: String(b.where || '').slice(0, 40), msg: String(b.msg || '').slice(0, 400), wallet: /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(b.wallet || '') ? b.wallet : null, lobby: /^[A-Z2-9]{6}$/.test(b.lobby || '') ? b.lobby : null, ua: String(b.ua || '').slice(0, 60) || null, role: ['dev', 'member'].includes(b.role) ? b.role : null, account: typeof b.account === 'string' ? b.account.replace(/^e:(.).*@/, 'e:$1…@').slice(0, 60) : null };
           if (!e.msg) return new Response('bad', { status: 400 });
           const list = (await S.get('errors')) || []; const now = Date.now();
           const same = list.find((x) => x.msg === e.msg && x.lobby === e.lobby && now - x.last < 120000);

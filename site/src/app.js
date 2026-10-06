@@ -33,11 +33,12 @@ const REP = { n: 0, last: new Map() };
 function report(msg) {
   try {
     msg = String(msg || '').slice(0, 400); const now = Date.now();
+    if (!A.session) return; // the relay takes reports from signed-in accounts only
     if (!msg || REP.n >= 25 || now - (REP.last.get(msg) || 0) < 60000) return; REP.last.set(msg, now); REP.n++;
     const ua = navigator.userAgent; const browser = (/Mobile|Android|iPhone/.test(ua) ? 'mobile ' : '') + (/Edg\//.test(ua) ? 'Edge' : /Brave/.test(ua) ? 'Brave' : /Chrome\//.test(ua) ? 'Chrome' : /Firefox\//.test(ua) ? 'Firefox' : /Safari\//.test(ua) ? 'Safari' : 'other');
     let wallet = null, lobby = null, role = null, mode = ''; try { wallet = address(); lobby = Y.code; role = Y.role; mode = W.mode === 'phantom' ? ' · Phantom signs' : ' · saved wallet signs'; } catch {}
     const level = /reject|cancel|denied|declined/i.test(msg) ? 'warn' : 'error';
-    gateToken().then(() => fetch(Y.relay + '/stats/error', { method: 'POST', headers: { 'content-type': 'application/json', 'x-gate': Y.token }, body: JSON.stringify({ level, where: (/^([a-z][a-z .]{1,20}):/i.exec(msg) || [])[1] || 'page', msg, wallet, lobby, role, ua: browser + mode }) })).catch(() => {});
+    gateToken().then(() => fetch(Y.relay + '/stats/error', { method: 'POST', headers: { 'content-type': 'application/json', 'x-gate': Y.token, 'x-session': A.session }, body: JSON.stringify({ level, where: (/^([a-z][a-z .]{1,20}):/i.exec(msg) || [])[1] || 'page', msg, wallet, lobby, role, ua: browser + mode }) })).catch(() => {});
   } catch {}
 }
 // only crashes from our own bundle: wallet extensions inject scripts that throw on their own (e.g. two EVM wallets

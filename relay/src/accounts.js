@@ -53,7 +53,7 @@ export function readSiws(env, text, address) {
   const exp = field('Expiration Time'); if (exp && Date.parse(exp) < Date.now()) return { error: 'sign-in message expired — try again' };
   return { nonce };
 }
-async function mintSession(env, id) { const exp = Date.now() + SESSION_MS; const body = b64u(te.encode(id + '|' + exp)); return body + '.' + (await hmac(secretOf(env), body)); }
+export async function mintSession(env, id) { const exp = Date.now() + SESSION_MS; const body = b64u(te.encode(id + '|' + exp)); return body + '.' + (await hmac(secretOf(env), body)); }
 export async function readSession(env, token) {
   if (!env.ACCOUNT_SECRET && !env.GATE_SECRET) return null;
   const [body, mac] = String(token || '').split('.'); if (!body || !mac) return null;

@@ -133,11 +133,16 @@ export default {
       return new Response('{}', { headers: { 'content-type': 'application/json', ...cors(env, req) } });
     }
     // a page reporting a problem a user hit (shown on the owner's dashboard): message, where, wallet, lobby, browser
+    // signed-in sessions only (x-session), a small body, and a per-account limit: nobody can fill the owner's list anonymously
     if (req.method === 'POST' && u.pathname === '/stats/error') {
       if (!(await gateOk(env, req.headers.get('x-gate') || cookieToken(req)))) return json({ error: 'gate' }, 401);
       const h = { 'content-type': 'application/json', ...cors(env, req) };
+      const who = await readSession(env, (req.headers.get('x-session') || '').slice(0, 512)); if (!who) return new Response('{"error":"sign in first"}', { status: 401, headers: h });
       if (await overLimit(env, ipOf(req), 'err', 30)) return new Response('{}', { status: 429, headers: h });
-      const b = await req.json().catch(() => ({})); await record(env, 'error', { src: 'site', level: b.level, where: b.where, msg: b.msg, wallet: b.wallet, lobby: b.lobby, ua: b.ua, role: b.role });
+      if (await overLimit(env, who, 'err-acct', 20, 600000)) return new Response('{}', { status: 429, headers: h });
+      const text = await req.text(); if (text.length > 2048) return new Response('{"error":"too long"}', { status: 413, headers: h });
+      let b = {}; try { b = JSON.parse(text) || {}; } catch {}
+      await record(env, 'error', { src: 'site', level: b.level, where: b.where, msg: b.msg, wallet: b.wallet, lobby: b.lobby, ua: b.ua, role: b.role, account: who });
       return new Response('{}', { headers: h });
     }
     if (req.method === 'POST' && u.pathname === '/stats/errors/clear') {
