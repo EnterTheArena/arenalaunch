@@ -512,7 +512,10 @@ const Y = { get amount() { return mainAmt(); }, ws: null, code: null, role: null
 async function gateToken() { if (Y.token) return Y.token; const j = await (await fetch('/api/token')).json(); if (!j.token) throw new Error('not signed in'); Y.token = j.token; Y.relay = j.relay; return j.token; }
 const ysend = (o) => { try { Y.ws?.send(JSON.stringify(o)); } catch {} };
 // my ticked extra wallets as the lobby sees them (count + SOL), sent with my buy amount
-const extraInfo = () => { const ex = extraWallets(); return { n: ex.length, sol: Math.round(ex.reduce((a, w) => a + w.amount, 0) * 1e6) / 1e6 }; };
+// as a teammate in someone else's lobby: at most 3 extra wallets of up to 10 SOL each ride along (the relay's limit)
+const MATE_EXTRA_N = 3, MATE_EXTRA_SOL = 10;
+const mateExtras = () => extraWallets().filter((w) => w.amount <= MATE_EXTRA_SOL).slice(0, MATE_EXTRA_N);
+const extraInfo = () => { const ex = mateExtras(); return { n: ex.length, sol: Math.round(ex.reduce((a, w) => a + w.amount, 0) * 1e6) / 1e6 }; };
 // set the ★ wallet's buy (the dev buy, or your first buy as a member) from the launch card — same rule as the wallets table
 function setMainAmt(v){ const n=Number(v); const a=Number.isFinite(n)&&n>0&&n<=100?n:0; if(V.active.sol==='phantom'){ PH.amount=a; savePH(); } else { const w=activeW(); if(w){ w.amount=a; saveV(); } } sendAmount(); render(); }
 const sendAmount = () => { if (Y.connected && Y.role === 'member') ysend({ t: 'amount', amount: Number(Y.amount) || 0, extra: extraInfo() }); };
@@ -599,7 +602,8 @@ async function onLobby(b) {
         if (canLock && lockedW(activeW())) locks.push(rawOf(await signTx(await lockTxFor(t0, owner, tx.minOut))));
         // my other ticked wallets: one transaction each, signed and paid by that wallet
         const tmpl = b.dry ? { ...b.template, blockhash: Keypair.generate().publicKey.toBase58() } : b.template; const extra = [];
-        for (const w of extraWallets()) { const lk = canLock && lockedW(w); const t = await memberBuyTx(tmpl, new PublicKey(w.address), w.amount, lk); t.feePayer = new PublicKey(w.address); if (w.id === 'phantom') log('warn', 'lobby: approve the Phantom wallet\'s buy in Phantom NOW'); const st2 = await signAs(w, t); extra.push(bs58.encode(st2.serialize({ requireAllSignatures: true, verifySignatures: true }))); if (lk) locks.push(rawOf(await signAs(w, await lockTxFor(tmpl, new PublicKey(w.address), t.minOut)))); }
+        if (mateExtras().length < extraWallets().length) log('warn', 'lobby: as a teammate only ' + MATE_EXTRA_N + ' extra wallets of up to ' + MATE_EXTRA_SOL + ' SOL each ride along — the others sit this one out');
+        for (const w of mateExtras()) { const lk = canLock && lockedW(w); const t = await memberBuyTx(tmpl, new PublicKey(w.address), w.amount, lk); t.feePayer = new PublicKey(w.address); if (w.id === 'phantom') log('warn', 'lobby: approve the Phantom wallet\'s buy in Phantom NOW'); const st2 = await signAs(w, t); extra.push(bs58.encode(st2.serialize({ requireAllSignatures: true, verifySignatures: true }))); if (lk) locks.push(rawOf(await signAs(w, await lockTxFor(tmpl, new PublicKey(w.address), t.minOut)))); }
         ysend({ t: 'signed', tx: bs58.encode(signed.serialize({ requireAllSignatures: true, verifySignatures: true })), extra, locks });
         if (locks.length) log('info', 'lobby: ' + locks.length + ' of my wallets will lock their tokens on Streamflow until ' + new Date(b.template.lockUntil * 1000).toLocaleString() + ' (right after each buy lands)');
         else if (!canLock && (lockedW(activeW()) || extraWallets().some(lockedW))) log('warn', 'lobby: the dev\'s page is older and does not offer locks — my wallets buy without locking');

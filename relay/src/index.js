@@ -85,8 +85,10 @@ async function safeEq(a, b) { const h = async (x) => new Uint8Array(await crypto
 async function overLimit(env, ip, bucket, limit, windowMs = 60000) { try { const r = await env.RATELIMIT.get(env.RATELIMIT.idFromName('b:' + bucket + ':' + ip)).fetch('https://rl/count', { method: 'POST', body: JSON.stringify({ limit, windowMs }) }); return !(await r.json()).allowed; } catch { return false; } }
 // the owner: a session (from Sign In With Solana on the site) of the ADMIN_WALLET. Fails closed when the var is unset.
 async function isAdmin(env, req) { if (!env.ADMIN_WALLET) return false; const id = await readSession(env, req.headers.get('x-session') || ''); return !!id && id === 'w:' + env.ADMIN_WALLET; }
-// a teammate's extra wallets in a launch: {n, sol}, bounded (10 wallets, 100 SOL each)
-const extraOf = (e) => { const n = Math.min(10, Math.max(0, Math.floor(Number(e?.n) || 0))); const sol = Math.min(n * 100, Math.max(0, Number(e?.sol) || 0)); return n && Number.isFinite(sol) && sol > 0 ? { n, sol } : null; };
+// a teammate's extra wallets in a launch: {n, sol}. The claim feeds everyone's slippage floors before anything is signed,
+// so it is kept small: at most 3 extra wallets of up to 10 SOL each (the same cap applies to the extra buys they sign)
+export const MAX_EXTRA_N = 3, MAX_EXTRA_SOL = 10;
+export const extraOf = (e) => { const n = Math.min(MAX_EXTRA_N, Math.max(0, Math.floor(Number(e?.n) || 0))); const sol = Math.min(n * MAX_EXTRA_SOL, Math.max(0, Number(e?.sol) || 0)); return n && Number.isFinite(sol) && sol > 0 ? { n, sol } : null; };
 const ipOf = (req) => req.headers.get('cf-connecting-ip') || 'unknown';
 const ACCT_LIMITS = { wallet: [30, 60000], nonce: [60, 60000], save: [60, 60000], vault: [120, 60000], 'email-start': [10, 3600000], 'email-check': [30, 60000], 'email-login': [30, 60000] };
 // a buy amount (SOL / ETH): a finite number in (0, 100]; anything else counts as 0
@@ -434,11 +436,12 @@ export class Lobby {
           let extraN = 0;
           if (!this.evm && L.template?.kind === 'pump' && Array.isArray(b.extra) && b.extra.length) {
             const taken = new Set([this.dev, ...this.members.keys()]); const keep = [];
-            for (const raw of b.extra.slice(0, 10).map(String)) {
+            if (b.extra.length > MAX_EXTRA_N) this.log('warn', me.name + ': only the first ' + MAX_EXTRA_N + ' extra wallets are taken (lobby limit)');
+            for (const raw of b.extra.slice(0, MAX_EXTRA_N).map(String)) {
               let bytes; try { bytes = bs58.decode(raw); } catch { continue; } if (bytes.length > 1232) continue;
               const w = firstSigner(bytes); const amount = pumpBuyAmount(bytes);
               if (!w || taken.has(w)) { this.log('warn', me.name + ': an extra buy was dropped (wallet already in this lobby)'); continue; }
-              if (!(amount > 0 && amount <= 100)) { this.log('warn', me.name + ': an extra buy was dropped (amount)'); continue; }
+              if (!(amount > 0 && amount <= MAX_EXTRA_SOL)) { this.log('warn', me.name + ': an extra buy was dropped (more than ' + MAX_EXTRA_SOL + ' SOL)'); continue; }
               const bad = validatePumpBuy(bytes, { wallet: w, amount }, L); if (bad) { this.log('warn', me.name + "'s extra wallet " + short(w) + ' was rejected: ' + bad); continue; }
               taken.add(w); keep.push({ wallet: w, amount, tx: raw });
             }

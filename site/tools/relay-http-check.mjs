@@ -1,6 +1,6 @@
 // The relay's HTTP rules, run against the real worker with in-memory Durable Objects. No network.
 //   node tools/relay-http-check.mjs   (from site/)
-import worker, { Stats, Accounts } from '../../relay/src/index.js';
+import worker, { Stats, Accounts, extraOf, MAX_EXTRA_N, MAX_EXTRA_SOL } from '../../relay/src/index.js';
 import { readSiws, mintSession } from '../../relay/src/accounts.js';
 import { mintToken } from '../api/gate.js';
 
@@ -67,6 +67,11 @@ const got = await errors(env);
 ok(r.status === 200 && got.length === 1 && got[0].account === 'w:11111111111111111111111111111112', 'a signed-in report is recorded with its account');
 let codes = []; for (let i = 0; i < 20; i++) codes.push((await worker.fetch(req('/stats/error', { headers: { 'x-gate': gate, 'x-session': sess }, body: { msg: 'n' + i } }), env)).status);
 ok(codes.filter((c) => c === 200).length === 18 && codes.slice(18).every((c) => c === 429), 'one account gets 20 reports per 10 minutes (2 used above), then 429');
+
+// ---- a teammate's claimed extra wallets stay small (they loosen everyone's slippage floors) ----
+const big = extraOf({ n: 10, sol: 1000 });
+ok(MAX_EXTRA_N === 3 && MAX_EXTRA_SOL === 10 && big.n === 3 && big.sol === 30, 'a claim of 10 wallets / 1000 SOL counts as 3 wallets / 30 SOL');
+ok(extraOf({ n: 2, sol: 5 }).sol === 5 && extraOf({ n: 0, sol: 5 }) === null && extraOf({ n: 2, sol: Infinity }).sol === 20, 'small claims kept; junk bounded');
 
 export const done = () => { console.log(fails ? fails + ' FAILED' : 'all relay http checks passed'); process.exit(fails ? 1 : 0); };
 export { ok, req, gate, env, SITE };
