@@ -15,5 +15,5 @@
     { "tag": "v3", "new_sqlite_classes": ["Accounts"] },
     { "tag": "v4", "new_sqlite_classes": ["Stats"] }
   ],
-  "vars": { "ADMIN_WALLET": "7K17RRjLKrUp8TA5229Gm249gMtDWP7WG5EHQ9Y2o6BJ", "ALLOWED_ORIGINS": "https://arenalaunch.fun,https://www.arenalaunch.fun,https://arenalaunch.bond,https://www.arenalaunch.bond,https://arenalaunch.vercel.app" }
+  "vars": { "ADMIN_WALLET": "7K17RRjLKrUp8TA5229Gm249gMtDWP7WG5EHQ9Y2o6BJ", "ALLOWED_ORIGINS": "https://arenalaunch.bond,https://www.arenalaunch.bond,https://arenalaunch.vercel.app" }
 }
