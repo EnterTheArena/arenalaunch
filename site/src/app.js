@@ -655,7 +655,8 @@ let LOGO = ls.get('sq_logo', null); // {name,type,size,dataUrl, uri?, key?}
 let launching = false;
 const ALTS = { list: ls.get('sq_alts', []) }; // lookup tables this browser made: [{addr, authority, at}]
 const saveAlts = () => ls.set('sq_alts', ALTS.list);
-const metaKey = () => [L.name, L.symbol, L.description, L.website, L.twitter, L.telegram, LOGO?.size, LOGO?.name].join('|');
+// 'tag1': metadata uploaded before the 'launched on arenalaunch.bond' description tag is uploaded again once
+const metaKey = () => ['tag1', L.name, L.symbol, L.description, L.website, L.twitter, L.telegram, LOGO?.size, LOGO?.name].join('|');
 async function metadataUri() {
   if (LOGO?.uri && LOGO.key === metaKey()) return LOGO.uri;
   log('info', 'launch: uploading the image and metadata to IPFS…');

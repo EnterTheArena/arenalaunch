@@ -4,6 +4,10 @@ import { signedIn } from './_session.js';
 // Uploads the coin image + metadata through pump.fun's own IPFS endpoint (the one their create page uses, no account
 // needed). metadataUri is what the create instruction carries. Gate enforced by middleware.
 export const config = { api: { bodyParser: { sizeLimit: '4mb' } } };
+// every coin made through arenalaunch says so at the end of its description (pump.fun forces "createdOn" to itself, so the
+// description is the one place this can go). The dev's own text is kept and trimmed to make room; never added twice.
+export const TAG = 'launched on arenalaunch.bond';
+export const tagged = (d) => { const s = String(d || '').trim(); if (s.toLowerCase().includes(TAG)) return s.slice(0, 500); const room = 500 - TAG.length - 2; return s ? s.slice(0, room).trimEnd() + '\n\n' + TAG : TAG; };
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'POST only' });
@@ -17,7 +21,7 @@ export default async function handler(req, res) {
   const fd = new FormData();
   fd.append('file', new Blob([bytes], { type: m[1] }), 'logo.' + m[2]);
   const link = (v) => { const s = String(v || '').trim().slice(0, 200); return /^https?:\/\//i.test(s) || !s ? s : 'https://' + s; };
-  fd.append('name', String(b.name || 'token').slice(0, 32)); fd.append('symbol', String(b.symbol || 'TKN').slice(0, 13)); fd.append('description', String(b.description || '').slice(0, 500));
+  fd.append('name', String(b.name || 'token').slice(0, 32)); fd.append('symbol', String(b.symbol || 'TKN').slice(0, 13)); fd.append('description', tagged(b.description));
   fd.append('twitter', link(b.twitter)); fd.append('telegram', link(b.telegram)); fd.append('website', link(b.website)); fd.append('showName', 'true');
   try {
     const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 25000);
