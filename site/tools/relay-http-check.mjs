@@ -1,6 +1,6 @@
 // The relay's HTTP rules, run against the real worker with in-memory Durable Objects. No network.
 //   node tools/relay-http-check.mjs   (from site/)
-import worker, { Stats, Accounts, extraOf, MAX_EXTRA_N, MAX_EXTRA_SOL, useRpc, bundlesAvailable } from '../../relay/src/index.js';
+import worker, { Stats, Accounts, extraOf, MAX_EXTRA_N, MAX_EXTRA_SOL, bundlesAvailable } from '../../relay/src/index.js';
 import { readSiws, mintSession } from '../../relay/src/accounts.js';
 import { mintToken } from '../api/gate.js';
 
@@ -74,8 +74,9 @@ ok(MAX_EXTRA_N === 3 && MAX_EXTRA_SOL === 10 && big.n === 3 && big.sol === 30, '
 ok(extraOf({ n: 2, sol: 5 }).sol === 5 && extraOf({ n: 0, sol: 5 }) === null && extraOf({ n: 2, sol: Infinity }).sol === 20, 'small claims kept; junk bounded');
 
 // ---- /health says whether the Helius key can send bundles (block 0 depends on it) ----
-{ const f0 = globalThis.fetch; globalThis.fetch = async () => Response.json({ jsonrpc: '2.0', id: null, error: { code: -32001, message: 'Method not available on your current plan' } });
-  useRpc({ SOL_RPC_URL: 'https://mainnet.helius-rpc.com/?api-key=test' }); ok((await bundlesAvailable()) === false, 'a Helius plan without sendBundle is reported as no bundles'); globalThis.fetch = f0; }
+{ // Helius Sender answers a probe bundle with a bare {code, message} and HTTP 500 asking for a tip: that means bundles are open
+  const f0 = globalThis.fetch; let url = null; globalThis.fetch = async (u) => { url = String(u); return new Response(JSON.stringify({ code: -32602, message: 'Invalid Request: bundle transactions must send a combined tip of at least 1000000 lamports to one of the following Helius wallets: [...]' }), { status: 500 }); };
+  ok((await bundlesAvailable()) === true && url.startsWith('https://sender.helius-rpc.com/'), 'bundles go to Helius Sender, and its tip answer reads as available'); globalThis.fetch = f0; }
 
 export const done = () => { console.log(fails ? fails + ' FAILED' : 'all relay http checks passed'); process.exit(fails ? 1 : 0); };
 export { ok, req, gate, env, SITE };

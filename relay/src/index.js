@@ -106,7 +106,7 @@ export default {
     useRpc(env);
     const u = new URL(req.url);
     if (req.method === 'OPTIONS') return new Response(null, { headers: cors(env, req) });
-    if (u.pathname === '/health') { let rpc = 'public only'; try { if (env.SOL_RPC_URL) rpc = new URL(env.SOL_RPC_URL).host + ' first'; } catch { rpc = 'SOL_RPC_URL set but not a URL'; } return json({ ok: true, t: Date.now(), gated: !!env.GATE_SECRET, rpc, bundles: (await bundlesAvailable()) ? 'yes (Helius Sender)' : 'NO — Helius Sender is not answering: teammates buy right after the create', order: RPCS.map((x) => { try { return new URL(x).host; } catch { return '?'; } }) }); } // hosts only, never the key
+    if (u.pathname === '/health') { let rpc = 'public only'; try { if (env.SOL_RPC_URL) rpc = new URL(env.SOL_RPC_URL).host + ' first'; } catch { rpc = 'SOL_RPC_URL set but not a URL'; } return json({ ok: true, t: Date.now(), gated: !!env.GATE_SECRET, rpc, bundles: (await bundlesAvailable()) ? 'yes (Helius Sender)' : 'NO — Helius Sender is not answering (' + bundleProbeWhy() + '): teammates buy right after the create', order: RPCS.map((x) => { try { return new URL(x).host; } catch { return '?'; } }) }); } // hosts only, never the key
     if (!originOk(env, req)) return json({ error: 'forbidden origin' }, 403);
     // per-IP attempt limiter for the site's password form (called by the Vercel gate function with a shared key)
     if (req.method === 'POST' && u.pathname === '/ratelimit') {
@@ -907,18 +907,19 @@ export function tipsHelius(b58tx) {
   try { const t = parseTx(bs58.decode(b58tx)); return t.ixs.some((ix) => ix.program === SYSTEM && ix.data.length === 12 && ix.data[0] === 2 && !ix.data[1] && !ix.data[2] && !ix.data[3] && HELIUS_TIPS.has(ix.accounts[1]) && u64(ix.data, 4) >= MIN_BUNDLE_TIP); } catch { return false; }
 }
 export function sigOf(b58tx) { try { return bs58.encode(bs58.decode(b58tx).subarray(1, 65)); } catch { return null; } }
-let BUNDLE_PROBE = { at: 0, ok: null };
+let BUNDLE_PROBE = { at: 0, ok: null, why: '' };
+export const bundleProbeWhy = () => BUNDLE_PROBE.why;
 export async function bundlesAvailable() {
   if (Date.now() - BUNDLE_PROBE.at < 600000) return BUNDLE_PROBE.ok;
   // base58 of one byte: not a transaction, so nothing can ever be sent by this probe
-  const r = await heliusBundle(['2']); BUNDLE_PROBE = { at: Date.now(), ok: r.ok || /tip|deserialize|invalid/i.test(r.err || '') }; // Sender reads it and asks for a tip: bundles are open
+  const r = await heliusBundle(['2']); BUNDLE_PROBE = { at: Date.now(), ok: r.ok || /tip|deserialize|invalid/i.test(r.err || ''), why: r.ok ? 'accepted' : String(r.err || '').slice(0, 120) }; // Sender reads it and asks for a tip: bundles are open
   return BUNDLE_PROBE.ok;
 }
 async function heliusBundle(txs) {
   try {
     const r = await fetchT(BUNDLE_URL, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'sendBundle', params: [txs.map((t) => b64(bs58.decode(t))), { encoding: 'base64' }] }) }, 5000);
     const j = await r.json().catch(() => ({})); if (j.result) return { ok: true, id: j.result };
-    return { ok: false, err: String(j.error?.message || ('HTTP ' + r.status)).slice(0, 120) };
+    return { ok: false, err: String(j.error?.message || j.message || ('HTTP ' + r.status)).slice(0, 160) }; // Sender answers errors as a bare {code, message}
   } catch (e) { return { ok: false, err: String(e.message || e).slice(0, 120) }; }
 }
 async function statusesOf(sigs) {
