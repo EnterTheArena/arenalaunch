@@ -518,18 +518,18 @@ export class Lobby {
     return this.pushRoster();
   }
 
-  // Block 0 as bundles through Helius: [create + first 4 buys] is all-or-nothing, so those land in the same block or not at
-  // all; the rest go in follow-up bundles of 5 sent right behind it. Returns null (→ the plain path) when bundles are not
+  // Block 0 as bundles through Helius Sender (at most 4 transactions each): [create + first 3 buys] is all-or-nothing, so
+  // those land in the same block or not at all; the rest go in follow-up bundles of 4 sent right behind it. Returns null (→ the plain path) when bundles are not
   // available or the first one is refused; returns { st0 } with the create's status once it lands, or falls back after ~2.5 s.
   async sendBundles(createTx, buys) {
     if (!BUNDLE_URL) return null;
-    const groups = [[createTx, ...buys.slice(0, 4)]]; for (let i = 4; i < buys.length; i += 5) groups.push(buys.slice(i, i + 5));
+    const groups = [[createTx, ...buys.slice(0, BUNDLE_MAX - 1)]]; for (let i = BUNDLE_MAX - 1; i < buys.length; i += BUNDLE_MAX) groups.push(buys.slice(i, i + BUNDLE_MAX));
     if (!bundleOk(groups[0])) { this.log('warn', 'block 0: the launch bundle tips less than 0.001 SOL (the page is out of date — reload it) — sending the plain way: teammates buy right after the create'); return null; }
     const id0 = await heliusBundle(groups[0]);
     if (!id0.ok) { this.log('warn', 'block 0: bundle refused by Helius (' + id0.err + ') — sending the plain way'); return null; }
     const rest = groups.slice(1).filter(bundleOk); // a group below Sender's minimum is not a valid bundle: its buys go out after the create
     const ids = await Promise.all(rest.map(heliusBundle));
-    this.log('info', 'block 0: sent as ' + (1 + ids.filter((x) => x.ok).length) + ' bundle(s) through Helius — the launch + ' + Math.min(4, buys.length) + ' buys together' + (buys.length > 4 ? ', ' + (buys.length - Math.min(4, buys.length)) + ' more right behind' : ''));
+    this.log('info', 'block 0: sent as ' + (1 + ids.filter((x) => x.ok).length) + ' bundle(s) through Helius — the launch + ' + Math.min(BUNDLE_MAX - 1, buys.length) + ' buys together' + (buys.length > BUNDLE_MAX - 1 ? ', ' + (buys.length - Math.min(BUNDLE_MAX - 1, buys.length)) + ' more right behind' : ''));
     const sig = sigOf(createTx); const end = Date.now() + 2500; let resent = 0;
     while (Date.now() < end) {
       await sleep(150);
@@ -872,7 +872,7 @@ export function validatePumpBuy(bytes, member, L) {
     if (ix.program === SYSTEM) {
       if (!isTransfer(ix) || ix.accounts[0] !== member.wallet) return 'unexpected system instruction';
       if (ix.accounts[1] === TREASURY) { if (u64(ix.data, 4) !== launchTax(want) || ++taxed > 1) return 'the 3% launch fee is wrong'; continue; }
-      if (!HELIUS_TIPS.has(ix.accounts[1]) || u64(ix.data, 4) > MAX_BUY_TIP || ++tips > 1) return 'unexpected transfer (only one bundle tip of at most 0.0002 SOL is allowed)';
+      if (!HELIUS_TIPS.has(ix.accounts[1]) || u64(ix.data, 4) > MAX_BUY_TIP || ++tips > 1) return 'unexpected transfer (only one bundle tip of at most 0.00025 SOL is allowed)';
       continue;
     }
     if (ix.program !== PUMP) return 'unexpected program ' + ix.program.slice(0, 6);
@@ -897,7 +897,8 @@ export function useRpc(env) { const u = env?.SOL_RPC_URL; if (u && !RPCS.include
 // Bundles go through Helius Sender: open to every plan (the RPC endpoint's sendBundle is not on the Developer plan), no key,
 // but a bundle must tip at least 0.001 SOL in total to Helius tip accounts — the launch transaction carries that by itself.
 const BUNDLE_URL = 'https://sender.helius-rpc.com/fast';
-export const SENDER_MIN_TIP = 1_000_000n, MAX_LAUNCH_TIP = 2_000_000n, MAX_BUY_TIP = 200_000n;
+// Sender refuses a bundle of more than 4 transactions ("bundle must contain no more than 4 transactions", live 2026-10-06)
+export const BUNDLE_MAX = 4, SENDER_MIN_TIP = 1_000_000n, MAX_LAUNCH_TIP = 2_000_000n, MAX_BUY_TIP = 250_000n;
 // lamports a transaction tips to Helius tip accounts
 export function tipOf(b58tx) { try { const t = parseTx(bs58.decode(b58tx)); let sum = 0n; for (const ix of t.ixs) if (ix.program === SYSTEM && ix.data.length === 12 && ix.data[0] === 2 && !ix.data[1] && !ix.data[2] && !ix.data[3] && HELIUS_TIPS.has(ix.accounts[1])) sum += u64(ix.data, 4); return sum; } catch { return 0n; } }
 export const bundleOk = (txs) => txs.reduce((a, t) => a + tipOf(t), 0n) >= SENDER_MIN_TIP;

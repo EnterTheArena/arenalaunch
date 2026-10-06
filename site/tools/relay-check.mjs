@@ -4,7 +4,7 @@ import { Keypair, Transaction, ComputeBudgetProgram, SystemProgram, PublicKey, T
 import bs58 from 'bs58';
 import { lockIx } from '../src/lock.js';
 import { pumpState, buildCreate, buyIxsFor, tokensFor, altKeysOf, signersOf, templateBad, feeSplitIxs, equalShares, launchTaxIx, TREASURY } from '../src/pump.js';
-import { validatePumpBuy, checkPumpLaunch, amountOf, tipsHelius, buyOrder, checkFeeSplit, checkLock, bundleOk, tipOf } from '../../relay/src/index.js';
+import { validatePumpBuy, checkPumpLaunch, amountOf, tipsHelius, buyOrder, checkFeeSplit, checkLock, bundleOk, tipOf, BUNDLE_MAX } from '../../relay/src/index.js';
 const HT = new PublicKey('4ACfpUFoaSD9bfPdeu6DBt89gB6ENTeHBXCAi87NhDEE');
 
 const RPC = 'https://api.mainnet-beta.solana.com';
@@ -26,8 +26,8 @@ const cases = {
   'stale blockhash': [(() => { const t = new Transaction({ feePayer: member.publicKey, recentBlockhash: Keypair.generate().publicKey.toBase58() }); t.add(...buyIxsFor(L.template, member.publicKey, 5e7, 1)); t.sign(member); return t.serialize(); })(), 'blockhash'],
   'sol transfer added': [mk(undefined, member, 5e7, [SystemProgram.transfer({ fromPubkey: member.publicKey, toPubkey: other.publicKey, lamports: 1 })]), 'unexpected'],
   'bundle tip 0.00001 SOL': [mk(undefined, member, 5e7, [SystemProgram.transfer({ fromPubkey: member.publicKey, toPubkey: HT, lamports: 10000 })]), null],
-  'bundle tip 0.0002 SOL (the most a buy may tip)': [mk(undefined, member, 5e7, [SystemProgram.transfer({ fromPubkey: member.publicKey, toPubkey: HT, lamports: 200000 })]), null],
-  'bundle tip too big': [mk(undefined, member, 5e7, [SystemProgram.transfer({ fromPubkey: member.publicKey, toPubkey: HT, lamports: 200001 })]), 'unexpected transfer'],
+  'bundle tip 0.00025 SOL (the most a buy may tip)': [mk(undefined, member, 5e7, [SystemProgram.transfer({ fromPubkey: member.publicKey, toPubkey: HT, lamports: 250000 })]), null],
+  'bundle tip too big': [mk(undefined, member, 5e7, [SystemProgram.transfer({ fromPubkey: member.publicKey, toPubkey: HT, lamports: 250001 })]), 'unexpected transfer'],
   'two bundle tips': [mk(undefined, member, 5e7, [SystemProgram.transfer({ fromPubkey: member.publicKey, toPubkey: HT, lamports: 10000 }), SystemProgram.transfer({ fromPubkey: member.publicKey, toPubkey: HT, lamports: 10000 })]), 'unexpected transfer'],
   'fee recipient swapped': [mk((ixs) => { ixs[1].keys[6] = { ...ixs[1].keys[6], pubkey: other.publicKey }; return ixs; }), /differs|derived/],
   'fee recipient + its account swapped': [mk((ixs) => { ixs[1].keys[6] = { ...ixs[1].keys[6], pubkey: other.publicKey }; ixs[1].keys[7] = { ...ixs[1].keys[7], pubkey: PublicKey.findProgramAddressSync([other.publicKey.toBuffer(), new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA').toBuffer(), new PublicKey('So11111111111111111111111111111111111111112').toBuffer()], new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL'))[0] }; return ixs; }), 'differs'],
@@ -77,8 +77,9 @@ for (const [name, tx, want] of [['create with a Helius tip', v0([...built.ixs, S
   for (const [name, got, want] of [
     ['launch tx tipping 0.001 SOL is a valid Sender bundle on its own', bundleOk([tipped(1000000)]), true],
     ['launch tx tipping 0.0001 SOL (old page) is not', bundleOk([tipped(100000), buyT(10000)]), false],
-    ['5 buys at 0.0002 SOL make a valid follow-up bundle', bundleOk([1, 2, 3, 4, 5].map(() => buyT(200000))), true],
-    ['4 buys at 0.0002 SOL do not', bundleOk([1, 2, 3, 4].map(() => buyT(200000))), false],
+    ['4 buys at 0.00025 SOL make a valid follow-up bundle (Sender: at most 4 per bundle)', bundleOk([1, 2, 3, 4].map(() => buyT(250000))), true],
+    ['3 buys at 0.00025 SOL do not', bundleOk([1, 2, 3].map(() => buyT(250000))), false],
+    ['bundles hold at most 4 transactions', BUNDLE_MAX === 4, true],
     ['tipOf reads the tip', tipOf(tipped(1234567)) === 1234567n, true],
     ['launch tx may tip 0.001 SOL', !checkPumpLaunch(tipped(1000000), L.template, D).err?.includes('unexpected instruction'), true],
     ['launch tx may not tip 0.003 SOL', !!checkPumpLaunch(tipped(3000000), L.template, D).err?.includes('unexpected instruction'), true],

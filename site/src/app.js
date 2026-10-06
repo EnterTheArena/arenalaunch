@@ -564,10 +564,11 @@ const rawOf = (tx) => bs58.encode(tx.serialize({ requireAllSignatures: true, ver
 const MEMBER_PRIO_MAX = 0.01;
 // Block 0 goes out as bundles (all-or-nothing groups the leader runs back to back), sent through Helius Sender, which takes
 // a bundle only if it tips at least 0.001 SOL in total to Helius tip accounts. The launch transaction tips that alone, so
-// [create + the first 4 squad buys] always qualifies; each buy tips 0.0002 SOL so any later group of 5 buys qualifies too.
+// [create + the first 3 squad buys] always qualifies (Sender takes at most 4 transactions per bundle); each buy tips
+// 0.00025 SOL so any later group of 4 buys qualifies too.
 // A teammate never tips more than BUNDLE_TIP_MAX (the relay refuses more).
 const HELIUS_TIPS = ['4ACfpUFoaSD9bfPdeu6DBt89gB6ENTeHBXCAi87NhDEE', 'D2L6yPZ2FmmmTKPgzaMKdhu6EWZcTpLy1Vhx8uvZe7NZ', '9bnz4RShgq1hAnLnZbP8kbgBg1kEmcJBYQq3gQbmnSta', '5VY91ws6B2hMmBFRsXkoAAdsPHBJwRfBht4DXox3xkwn', '2nyhqdwKcJZR2vcqCyrYsaPVdAnFoJjiksCXJ7hfEYgD', '2q5pghRs6arqVjRvT5gfgWfWcHWmw1ZuCzphgd5KfWGJ', 'wyvPkWjVZz1M8fHQnMMCDTQDbkManefNNhweYk5WkcF', '3KCKozbAaF75qEU33jtzozcJ29yJuaLJTy2jFdzUY8bT', '4vieeGHPYPG2MmyPRcYjdiDmmhN3ww7hsFNap8pVN3Ey', '4TQLFNWK8AovT1gFvda5jfw2oJeRMKEmw7aH6MGBJ3or'];
-const BUNDLE_TIP_CREATE = 1000000, BUNDLE_TIP_BUY = 200000, BUNDLE_TIP_MAX = 200000; // lamports: 0.001 / 0.0002 / 0.0002 SOL
+const BUNDLE_TIP_CREATE = 1000000, BUNDLE_TIP_BUY = 250000, BUNDLE_TIP_MAX = 250000; // lamports: 0.001 / 0.00025 / 0.00025 SOL
 const tipIx = (from, lamports) => SystemProgram.transfer({ fromPubkey: from, toPubkey: new PublicKey(HELIUS_TIPS[Math.floor(Math.random() * HELIUS_TIPS.length)]), lamports });
 const buyTipIxs = (t, owner) => { const l = Math.min(BUNDLE_TIP_MAX, Math.max(0, Math.round(Number(t.bundleTip) || 0))); return l >= 1000 ? [tipIx(owner, l)] : []; };
 // before signing anything the dev sent: a fresh coin (its mint not on chain yet) made by this lobby's dev, every buy account
