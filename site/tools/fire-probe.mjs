@@ -22,7 +22,7 @@ const alt = new AddressLookupTableAccount({ key: Keypair.generate().publicKey, s
 const vtx = new VersionedTransaction(new TransactionMessage({ payerKey: dev.publicKey, recentBlockhash: bh, instructions: [ComputeBudgetProgram.setComputeUnitLimit({ units: 400000 }), ...built.ixs, launchTaxIx(dev.publicKey, 1e7)] }).compileToV0Message([alt]));
 vtx.sign([mint, dev]);
 
-const { code } = await (await fetch(RELAY + '/lobby/create', { method: 'POST', headers: { 'content-type': 'application/json', 'x-gate': gate, origin: 'http://localhost:5182' }, body: '{}' })).json();
+const { code } = await (await fetch(RELAY + '/lobby/create', { method: 'POST', headers: { 'content-type': 'application/json', 'x-gate': gate, origin: process.env.ORIGIN || 'https://arenalaunch.bond' }, body: '{}' })).json();
 const ws = new WebSocket(RELAY.replace(/^http/, 'ws') + '/lobby/' + code + '/ws?g=' + encodeURIComponent(gate));
 const t0 = Date.now(); const at = () => ((Date.now() - t0) / 1000).toFixed(1) + 's';
 ws.onmessage = (e) => { const m = JSON.parse(e.data); if (m.t === 'roster') return; console.log(at(), m.t, m.msg || m.error || (m.t === 'result' ? JSON.stringify({ ok: m.ok, error: m.error }) : '')); if (m.t === 'result') { ws.close(); process.exit(0); } };

@@ -90,8 +90,12 @@ const ACCT_LIMITS = { wallet: [30, 60000], nonce: [60, 60000], save: [60, 60000]
 // a buy amount (SOL / ETH): a finite number in (0, 100]; anything else counts as 0
 export const amountOf = (v) => { const n = Number(v); return Number.isFinite(n) && n > 0 && n <= 100 ? n : 0; };
 const cookieToken = (req) => (/(?:^|;\s*)sq_gate=([^;]+)/.exec(req.headers.get('cookie') || '') || [])[1] || null;
-const originOk = (env, req) => { const o = req.headers.get('origin'); if (!o) return true; const allow = (env.ALLOWED_ORIGINS || '').split(',').map((s) => s.trim()).filter(Boolean); return !allow.length || allow.includes(o) || /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(o); };
-const cors = (env, req) => ({ 'access-control-allow-origin': req.headers.get('origin') || '*', 'access-control-allow-credentials': 'true', 'access-control-allow-headers': 'content-type,x-gate,authorization,x-session', 'access-control-allow-methods': 'POST,GET,OPTIONS', 'vary': 'origin' });
+// browsers send Origin; scripts usually do not (they still need the gate token). Localhost is allowed only when the DEV
+// var is set (wrangler dev / .dev.vars), never in production.
+const allowedOrigin = (env, o) => (env.ALLOWED_ORIGINS || '').split(',').map((s) => s.trim()).filter(Boolean).includes(o) || (!!env.DEV && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(o));
+export const originOk = (env, req) => { const o = req.headers.get('origin'); return !o || allowedOrigin(env, o); };
+// CORS reflects an origin only when it is one of ours
+export const cors = (env, req) => ({ ...(allowedOrigin(env, req.headers.get('origin') || '') ? { 'access-control-allow-origin': req.headers.get('origin') } : {}), 'access-control-allow-credentials': 'true', 'access-control-allow-headers': 'content-type,x-gate,authorization,x-session', 'access-control-allow-methods': 'POST,GET,OPTIONS', 'vary': 'origin' });
 
 export default {
   async fetch(req, env) {

@@ -1,5 +1,6 @@
 // Local dev server: public/ + the /api functions, gate skipped (a valid gate cookie is minted from .secrets.json so the
-// page can open lobbies on the live relay, which allows localhost origins).
+// page can open lobbies). The live relay refuses localhost origins: run a local relay (`npx wrangler dev` in relay/ with
+// DEV=1 in relay/.dev.vars) and start this with RELAY_URL=http://127.0.0.1:8787.
 //   node site/tools/dev.mjs   → http://localhost:5182
 import { createServer } from 'http';
 import { readFileSync, existsSync } from 'fs';

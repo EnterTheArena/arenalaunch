@@ -8,7 +8,7 @@ import bs58 from 'bs58';
 import { mintToken } from '../api/gate.js';
 const RELAY = process.env.RELAY || 'https://relay.arenalaunch.bond';
 const sec = JSON.parse(readFileSync(new URL('../.secrets.json', import.meta.url)));
-const gate = mintToken(sec.GATE_SECRET); const H = { 'content-type': 'application/json', 'x-gate': gate, origin: 'http://localhost:5182' };
+const gate = mintToken(sec.GATE_SECRET); const H = { 'content-type': 'application/json', 'x-gate': gate, origin: process.env.ORIGIN || 'https://arenalaunch.bond' };
 let bad = 0; const check = (name, ok, got) => { if (!ok) bad++; console.log(ok ? 'ok  ' : 'FAIL', name, ok ? '' : JSON.stringify(got)); };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const wallet = () => { const k = ed25519.utils.randomSecretKey(); return { k, pub: bs58.encode(ed25519.getPublicKey(k)) }; };

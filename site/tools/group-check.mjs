@@ -12,7 +12,7 @@ import { mintToken } from '../api/gate.js';
 
 const RELAY = process.env.RELAY || 'https://relay.arenalaunch.bond';
 const gate = mintToken(JSON.parse(readFileSync(new URL('../.secrets.json', import.meta.url))).GATE_SECRET);
-const H = { 'content-type': 'application/json', 'x-gate': gate, origin: 'http://localhost:5182' };
+const H = { 'content-type': 'application/json', 'x-gate': gate, origin: process.env.ORIGIN || 'https://arenalaunch.bond' };
 const RPC = process.env.SOL_RPC_URL || 'https://solana-rpc.publicnode.com';
 const getAccounts = async (a) => (await (await fetch(RPC, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getMultipleAccounts', params: [a, { encoding: 'base64' }] }) })).json()).result.value;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

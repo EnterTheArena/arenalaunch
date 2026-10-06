@@ -39,7 +39,8 @@ const NONCE_MS = 5 * 60000;
 const hex = (u8) => Array.from(u8, (b) => b.toString(16).padStart(2, '0')).join('');
 async function newNonce(env) { const t = Date.now().toString(36).padStart(9, '0'); const r = hex(crypto.getRandomValues(new Uint8Array(8))); return t + r + (await hmac(secretOf(env), 'nonce:' + t + r)).replace(/[^a-zA-Z0-9]/g, '').slice(0, 16); }
 async function nonceOk(env, n) { if (!/^[0-9a-z]{9}[0-9a-f]{16}[A-Za-z0-9]{16}$/.test(n)) return false; const t = n.slice(0, 9), r = n.slice(9, 25); if (!eq((await hmac(secretOf(env), 'nonce:' + t + r)).replace(/[^a-zA-Z0-9]/g, '').slice(0, 16), n.slice(25))) return false; const at = parseInt(t, 36); return Date.now() - at < NONCE_MS && at - Date.now() < 30000; }
-export const siteHosts = (env) => [...(env.ALLOWED_ORIGINS || '').split(',').map((o) => { try { return new URL(o.trim()).host; } catch { return null; } }).filter(Boolean), 'localhost:5182', '127.0.0.1:5182'];
+// localhost is a sign-in domain only when the DEV var is set (wrangler dev), never in production
+export const siteHosts = (env) => [...(env.ALLOWED_ORIGINS || '').split(',').map((o) => { try { return new URL(o.trim()).host; } catch { return null; } }).filter(Boolean), ...(env.DEV ? ['localhost:5182', '127.0.0.1:5182'] : [])];
 // returns {nonce} when the message is a valid sign-in for this address on one of our domains, else {error}
 export function readSiws(env, text, address) {
   const lines = String(text).split('\n'); const m = /^(.+) wants you to sign in with your Solana account:$/.exec(lines[0] || '');
