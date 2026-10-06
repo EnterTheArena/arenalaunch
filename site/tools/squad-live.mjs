@@ -61,7 +61,45 @@ if (cmd === 'sweep') {
   }
   process.exit(0);
 }
-if (cmd !== 'launch') { console.log('addr | fund | launch | sweep <address>'); process.exit(1); }
+// sell every pump.fun token the test wallets hold, close the emptied token accounts (rent back), collect the dev's creator
+// fees, and deactivate/close the lookup tables the launches made — so a test wastes nothing but network fees
+if (cmd === 'cleanup') {
+  const { OnlinePumpSdk, PUMP_SDK } = await import('@pump-fun/pump-sdk');
+  const { Connection } = await import('@solana/web3.js');
+  const { createCloseAccountInstruction } = await import('@solana/spl-token');
+  const TOKEN22 = new PublicKey('TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb');
+  const sdk = new OnlinePumpSdk(new Connection(RPC, 'confirmed')); const global = await sdk.fetchGlobal();
+  const v0 = async (kp, ixs, cu = 300000) => { const v = new VersionedTransaction(new TransactionMessage({ payerKey: kp.publicKey, recentBlockhash: await bh(), instructions: [...prio(cu, 0.00002), ...ixs] }).compileToV0Message()); v.sign([kp]); return sendConfirm(v); };
+  for (const kp of [dev, ...mates]) {
+    const accs = (await rpc('getTokenAccountsByOwner', [kp.publicKey.toBase58(), { programId: TOKEN22.toBase58() }, { encoding: 'jsonParsed', commitment: 'confirmed' }])).value;
+    for (const a of accs) {
+      const info = a.account.data.parsed.info; const mint = new PublicKey(info.mint); const amount = new BN(info.tokenAmount.amount); const ata = new PublicKey(a.pubkey);
+      try {
+        const ixs = [];
+        if (amount.gtn(0)) { const s = await sdk.fetchSellState(mint, kp.publicKey, TOKEN22); ixs.push(...(await PUMP_SDK.sellV2Instructions({ global, bondingCurveAccountInfo: s.bondingCurveAccountInfo, bondingCurve: s.bondingCurve, mint, user: kp.publicKey, amount, quoteAmount: new BN(0), slippage: 0, tokenProgram: TOKEN22, quoteTokenProgram: s.quoteTokenProgram }))); }
+        ixs.push(createCloseAccountInstruction(ata, kp.publicKey, kp.publicKey, [], TOKEN22));
+        const before = await bal(kp.publicKey); const sig = await v0(kp, ixs);
+        console.log(kp.publicKey.toBase58().slice(0, 6), 'sold', info.tokenAmount.uiAmountString, mint.toBase58().slice(0, 4) + ' + closed its account: +' + ((await bal(kp.publicKey)) - before).toFixed(6), 'SOL', sig.slice(0, 12));
+      } catch (e) { console.log(kp.publicKey.toBase58().slice(0, 6), mint.toBase58().slice(0, 4), 'FAILED', String(e.message || e).slice(0, 200)); }
+    }
+  }
+  // creator fees are NOT collected here: on a test coin they are smaller than the rent pump.fun's collect makes the caller pay
+  // for its own fee-vault account (live 2026-10-06: +0.000826 fees, -0.001488 rent)
+  // lookup tables owned by the dev: deactivate now; close (rent back) once ~513 slots have passed — run cleanup again later
+  const alts = (await rpc('getProgramAccounts', ['AddressLookupTab1e1111111111111111111111111', { encoding: 'base64', filters: [{ memcmp: { offset: 22, bytes: dev.publicKey.toBase58() } }] }])) || [];
+  const slotNow = await rpc('getSlot', [{ commitment: 'finalized' }]);
+  for (const a of alts) {
+    const key = new PublicKey(a.pubkey); const t = AddressLookupTableAccount.deserialize(Buffer.from(a.account.data[0], 'base64'));
+    try {
+      if (t.deactivationSlot === BigInt('18446744073709551615')) { await v0(dev, [AddressLookupTableProgram.deactivateLookupTable({ lookupTable: key, authority: dev.publicKey })], 50000); console.log('lookup table', a.pubkey.slice(0, 6), 'deactivated — close it with cleanup again in ~4 minutes'); }
+      else if (BigInt(slotNow) > t.deactivationSlot + 513n) { await v0(dev, [AddressLookupTableProgram.closeLookupTable({ lookupTable: key, authority: dev.publicKey, recipient: dev.publicKey })], 50000); console.log('lookup table', a.pubkey.slice(0, 6), 'closed: +' + (a.account.lamports / 1e9).toFixed(6), 'SOL'); }
+      else console.log('lookup table', a.pubkey.slice(0, 6), 'still cooling down (' + (Number(t.deactivationSlot + 513n) - slotNow) + ' slots left)');
+    } catch (e) { console.log('lookup table', a.pubkey.slice(0, 6), String(e.message || e).slice(0, 160)); }
+  }
+  for (const k of [dev, ...mates]) console.log('  ', k.publicKey.toBase58(), await bal(k.publicKey), 'SOL');
+  process.exit(0);
+}
+if (cmd !== 'launch') { console.log('addr | fund | launch | cleanup | sweep <address>'); process.exit(1); }
 
 // ---- launch ----
 const st = await pumpState(getAccounts);
