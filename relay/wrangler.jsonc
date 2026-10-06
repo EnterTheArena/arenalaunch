@@ -7,13 +7,14 @@
   "workers_dev": false,
   "routes": [{ "pattern": "relay.arenalaunch.bond", "custom_domain": true }],
   "durable_objects": {
-    "bindings": [{ "name": "LOBBY", "class_name": "Lobby" }, { "name": "RATELIMIT", "class_name": "RateLimit" }, { "name": "ACCOUNTS", "class_name": "Accounts" }, { "name": "STATS", "class_name": "Stats" }]
+    "bindings": [{ "name": "LOBBY", "class_name": "Lobby" }, { "name": "RATELIMIT", "class_name": "RateLimit" }, { "name": "ACCOUNTS", "class_name": "Accounts" }, { "name": "STATS", "class_name": "Stats" }, { "name": "CLAIMS", "class_name": "Claims" }]
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["Lobby"] },
     { "tag": "v2", "new_sqlite_classes": ["RateLimit"] },
     { "tag": "v3", "new_sqlite_classes": ["Accounts"] },
-    { "tag": "v4", "new_sqlite_classes": ["Stats"] }
+    { "tag": "v4", "new_sqlite_classes": ["Stats"] },
+    { "tag": "v5", "new_sqlite_classes": ["Claims"] }
   ],
   "vars": { "ADMIN_WALLET": "7K17RRjLKrUp8TA5229Gm249gMtDWP7WG5EHQ9Y2o6BJ", "ALLOWED_ORIGINS": "https://arenalaunch.bond,https://www.arenalaunch.bond,https://arenalaunch.vercel.app" }
 }

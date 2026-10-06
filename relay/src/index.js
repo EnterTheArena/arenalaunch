@@ -20,6 +20,7 @@ import { ed25519 } from '@noble/curves/ed25519.js';
 import bs58 from 'bs58';
 export { Accounts } from './accounts.js';
 export { Stats } from './stats.js';
+export { Claims } from './claims.js';
 import { record } from './stats.js';
 import { readSession } from './accounts.js';
 import { pda, ata, text } from './pda.js';
@@ -112,6 +113,11 @@ export default {
       // the site's API functions: a named bucket with its own limit (/api/sol, /api/ipfs, /api/pump)
       if (b.bucket) { const bucket = String(b.bucket).replace(/[^a-z0-9_-]/gi, '').slice(0, 24); const over = await overLimit(env, ip, 'site-' + bucket, Math.min(10000, Math.max(1, Number(b.limit) || 60)), Math.min(3600000, Math.max(1000, Number(b.windowMs) || 60000))); return json({ allowed: !over }); }
       return env.RATELIMIT.get(env.RATELIMIT.idFromName('ip:' + ip)).fetch('https://rl/hit', { method: 'POST', body: JSON.stringify({ ok: !!b.ok, limit: 8, windowMs: 15 * 60000 }) });
+    }
+    // the site's paid features: reserve a fee payment's signature for one order (server to server, shared RL_KEY)
+    if (req.method === 'POST' && u.pathname === '/fee/claim') {
+      if (!env.RL_KEY || !(await safeEq(req.headers.get('x-rl-key') || '', env.RL_KEY))) return json({ error: 'forbidden' }, 403);
+      return env.CLAIMS.get(env.CLAIMS.idFromName('all')).fetch('https://claims/claim', { method: 'POST', body: await req.text() });
     }
     // the site's API functions checking a visitor's account session (server to server, shared RL_KEY)
     if (req.method === 'POST' && u.pathname === '/session/check') {

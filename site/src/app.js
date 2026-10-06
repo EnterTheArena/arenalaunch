@@ -7,6 +7,7 @@ import bs58 from 'bs58';
 import BN from 'bn.js';
 import { lockIx, LOCK_FEE_SOL, LOCK_FEE_PCT } from './lock.js';
 import { pumpState, buildCreate, buyIxsFor, tokensFor, tokensAt, altKeysOf, signersOf, templateBad, feeSplitIxs, equalShares, TREASURY, LAUNCH_TAX_BPS, HUSHER_TAX_BPS, launchTaxIx } from './pump.js';
+import { husherFee } from './fees.js';
 
 const $ = (s) => document.querySelector(s);
 const short = (a) => (a && a.length > 12 ? a.slice(0, 4) + '…' + a.slice(-4) : a || '');
@@ -384,18 +385,42 @@ async function pvtEstimate() {
   renderXfer();
 }
 
-function pvtTax(sol) { return Math.floor(lam(sol) * HUSHER_TAX_BPS / 10000); } // lamports
+function pvtTax(sol) { return husherFee(lam(sol)); } // lamports
+// confirmed (or failed) within ms
+async function waitConfirmed(sig, ms = 60000) {
+  for (const end = Date.now() + ms; Date.now() < end; await sleep(1500)) {
+    const st = (await rpc('getSignatureStatuses', [[sig], { searchTransactionHistory: false }]))?.value?.[0];
+    if (st?.err) throw new Error('the fee payment failed on chain (' + sig + ')');
+    if (st && (st.confirmationStatus === 'confirmed' || st.confirmationStatus === 'finalized')) return sig;
+  }
+  throw new Error('the fee payment was not confirmed within ' + ms / 1000 + 's — check ' + sig);
+}
+// Two steps, in this order: (1) the arenalaunch fee goes to the treasury on its own and confirms, (2) the server checks
+// that payment on chain and only then makes the Husher order. A payment made but not yet used is reused, so a failed
+// order never charges the fee twice.
 async function pvtCreate() {
   const amt = Number($('#tAmt').value), to = tAddr(T.to);
   if (!(amt > 0) || !to) return;
+  const tax = pvtTax(amt);
+  const reuse = T.fee && T.fee.from === T.from && T.fee.lamports >= tax;
+  if (!reuse && !confirm('Private transfer of ' + fsol(amt) + ' SOL from ' + tName(T.from) + '\n\n1. Now: pay the ' + HUSHER_TAX_BPS / 100 + '% arenalaunch fee, ' + fsol(tax / 1e9) + ' SOL (one transaction).\n2. Then: send ' + fsol((lam(amt) - tax) / 1e9) + ' SOL to the Husher deposit address shown next.')) return;
   T.busy = true; renderXfer(); $('#tMsg').textContent = '';
   try {
-    const tax = pvtTax(amt);
-    T.order = await husher('create', { amount: (lam(amt) - tax) / 1e9, address: to }); T.tax = tax;
-    T.sent = false;
-    log('success', 'private transfer order ' + T.order.id + ' created — send ' + fsol(amt) + ' SOL to the deposit address');
-    pvtPoll();
-  } catch (e) { $('#tMsg').textContent = e.message; log('error', 'private transfer: ' + e.message); }
+    if (!reuse) {
+      $('#tMsg').textContent = 'Paying the fee…';
+      const sig = T.from === 'phantom' ? await phantomDeposit(TREASURY, tax / 1e9) : await sendSol(keyOf(sols().find((w) => 'w:' + w.id === T.from)), TREASURY, tax / 1e9);
+      T.fee = { sig, lamports: tax, from: T.from }; log('info', 'private transfer fee sent — ' + sig);
+      await waitConfirmed(sig);
+    }
+    $('#tMsg').textContent = 'Fee paid ✓ — creating the order…';
+    for (let i = 0; ; i++) { // the server reads the payment from chain; just after confirming it may not see it yet
+      try { T.order = await husher('create', { amount: (lam(amt) - tax) / 1e9, address: to, feeSig: T.fee.sig }); break; }
+      catch (e) { if (!/not confirmed yet|try again in a moment/.test(e.message) || i >= 8) throw e; await sleep(2500); }
+    }
+    T.tax = T.fee.lamports; T.fee = null; T.sent = false; $('#tMsg').textContent = '';
+    log('success', 'private transfer order ' + T.order.id + ' created — send ' + fsol(T.order.sendAmount) + ' SOL to the deposit address');
+    pvtPoll(); setTimeout(refreshBalances, 2000);
+  } catch (e) { $('#tMsg').textContent = e.message + (T.fee ? ' — your fee payment is kept: press the button again to retry without paying twice' : ''); log('error', 'private transfer: ' + e.message); }
   finally { T.busy = false; renderXfer(); }
 }
 
@@ -403,12 +428,11 @@ async function pvtDeposit() {
   if (!T.order || T.sent) return;
   const amt = T.order.sendAmount, dep = T.order.payinAddress; // the order's amount, even if the box was edited since
   if (!dep || !(amt > 0)) return;
-  const fee = [{ to: TREASURY, lamports: T.tax }];
-  if (!confirm('Send ' + fsol(amt) + ' SOL to the Husher deposit address?\n\n' + dep + '\n\n+ ' + fsol(T.tax / 1e9) + ' SOL arenalaunch fee (' + HUSHER_TAX_BPS / 100 + '%), in the same transaction.\n\nOnce sent, Husher privately delivers ' + fsol(T.order.toAmount) + ' SOL to ' + tName(T.to) + '.')) return;
+  if (!confirm('Send ' + fsol(amt) + ' SOL to the Husher deposit address?\n\n' + dep + '\n\n(the arenalaunch fee is already paid)\n\nOnce sent, Husher privately delivers ' + fsol(T.order.toAmount) + ' SOL to ' + tName(T.to) + '.')) return;
   T.busy = true; renderXfer();
   try {
-    if (T.from === 'phantom') { await phantomDeposit(dep, amt, fee); }
-    else { const w = sols().find((w) => 'w:' + w.id === T.from); if (!w) throw new Error('wallet not found'); await sendSol(keyOf(w), dep, amt, fee); }
+    if (T.from === 'phantom') { await phantomDeposit(dep, amt); }
+    else { const w = sols().find((w) => 'w:' + w.id === T.from); if (!w) throw new Error('wallet not found'); await sendSol(keyOf(w), dep, amt); }
     T.sent = true;
     log('success', 'deposit sent to Husher — waiting for confirmation…');
     setTimeout(refreshBalances, 3000);
