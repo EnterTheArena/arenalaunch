@@ -31,10 +31,14 @@ Live: https://arenalaunch.bond
 ```bash
 cd site && npm install && npm run bundle
 node tools/dev.mjs            # http://localhost:5182 (needs site/.secrets.json: GATE_SECRET, ...)
-cd ../relay && npm install && npx wrangler dev
+cd ../relay && npm install && npx wrangler dev   # with DEV=1 in relay/.dev.vars; then RELAY_URL=http://127.0.0.1:8787 node tools/dev.mjs
 ```
 
-Relay settings: `ALLOWED_ORIGINS` (wrangler.jsonc), and secrets `ADMIN_WALLET` (the wallet allowed into /stats), `SOL_RPC_URL`, `ACCOUNT_SECRET` / `GATE_SECRET`, `RL_KEY`.
+Relay settings: `ALLOWED_ORIGINS` and `ADMIN_WALLET` (the wallet allowed into /stats) in wrangler.jsonc, and secrets `SOL_RPC_URL`, `ACCOUNT_SECRET` / `GATE_SECRET`, `RL_KEY`. `DEV` (local only, never in production) lets localhost origins and sign-in messages through. Without `GATE_SECRET` the relay refuses everything (fails closed).
+
+Private transfers (Husher): the page pays the 2% fee to the treasury first, as its own transaction; `/api/husher` makes the order only after reading that payment on chain (confirmed, under 30 minutes old, enough for the amount) and reserving its signature at the relay's `/fee/claim` (`RL_KEY`), so one payment buys one order. The fee constants live in `site/api/_fees.js`, shared by the page and the function.
+
+Vault keys: a Phantom account's vault key is SHA-256(signature over the fixed unlock message ‖ a per-account pepper). The relay hands the pepper out only with a fresh Sign In With Solana, never with a session alone. Vaults sealed before the pepper are re-sealed on the next sign-in. Across a reload the key is a non-extractable CryptoKey in IndexedDB, not bytes in sessionStorage.
 
 The site's proxies (`/api/sol` on the `SOL_RPC_URL` Helius key, `/api/husher` on `HUSHER_KEY`, `/api/ipfs`, `/api/pump`) answer signed-in users only: the page sends the account session as `x-session`. The site checks it itself when it has the relay's `ACCOUNT_SECRET` (or `GATE_SECRET` when the relay uses that), else asks the relay's `/session/check` with `RL_KEY`.
 
@@ -49,6 +53,10 @@ node tools/build-sim.mjs fee-sim && node tools/.fee-sim.bundle.mjs --coin <mint>
 node tools/lobby-check.mjs     # live lobby rules
 node tools/email-check.mjs     # email sign-in rules (offline)
 node tools/api-gate-check.mjs  # /api/sol, /api/husher, /api/ipfs, /api/pump answer signed-in users only (offline)
+node tools/relay-http-check.mjs   # gate fails closed, origins/CORS, /stats/error rules (offline)
+node tools/relay-store-check.mjs  # bounded storage: account summary + pruning, visitor HLL, idle lobbies (offline)
+node tools/husher-fee-check.mjs   # the private-transfer fee is enforced by the server, one order per payment (offline)
+node tools/vault-pepper-check.mjs # a phished unlock signature + stolen session cannot open a vault (offline)
 node tools/build-sim.mjs group-check && node tools/.group-check.bundle.mjs   # dev + 3 teammates rehearsal
 ```
 
