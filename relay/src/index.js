@@ -106,7 +106,7 @@ export default {
     useRpc(env);
     const u = new URL(req.url);
     if (req.method === 'OPTIONS') return new Response(null, { headers: cors(env, req) });
-    if (u.pathname === '/health') { let rpc = 'public only'; try { if (env.SOL_RPC_URL) rpc = new URL(env.SOL_RPC_URL).host + ' first'; } catch { rpc = 'SOL_RPC_URL set but not a URL'; } return json({ ok: true, t: Date.now(), gated: !!env.GATE_SECRET, rpc, bundles: (await bundlesAvailable()) ? 'yes' : 'NO — teammates buy one block after the create (needs a Helius plan with sendBundle)', order: RPCS.map((x) => { try { return new URL(x).host; } catch { return '?'; } }) }); } // hosts only, never the key
+    if (u.pathname === '/health') { let rpc = 'public only'; try { if (env.SOL_RPC_URL) rpc = new URL(env.SOL_RPC_URL).host + ' first'; } catch { rpc = 'SOL_RPC_URL set but not a URL'; } return json({ ok: true, t: Date.now(), gated: !!env.GATE_SECRET, rpc, bundles: (await bundlesAvailable()) ? 'yes (Helius Sender)' : 'NO — Helius Sender is not answering: teammates buy right after the create', order: RPCS.map((x) => { try { return new URL(x).host; } catch { return '?'; } }) }); } // hosts only, never the key
     if (!originOk(env, req)) return json({ error: 'forbidden origin' }, 403);
     // per-IP attempt limiter for the site's password form (called by the Vercel gate function with a shared key)
     if (req.method === 'POST' && u.pathname === '/ratelimit') {
@@ -523,11 +523,11 @@ export class Lobby {
   // available or the first one is refused; returns { st0 } with the create's status once it lands, or falls back after ~2.5 s.
   async sendBundles(createTx, buys) {
     if (!BUNDLE_URL) return null;
-    if (!tipsHelius(createTx)) { this.log('info', 'block 0: the launch transaction carries no bundle tip (older page) — sending the plain way'); return null; }
     const groups = [[createTx, ...buys.slice(0, 4)]]; for (let i = 4; i < buys.length; i += 5) groups.push(buys.slice(i, i + 5));
+    if (!bundleOk(groups[0])) { this.log('warn', 'block 0: the launch bundle tips less than 0.001 SOL (the page is out of date — reload it) — sending the plain way: teammates buy right after the create'); return null; }
     const id0 = await heliusBundle(groups[0]);
     if (!id0.ok) { this.log('warn', 'block 0: bundle refused by Helius (' + id0.err + ') — sending the plain way'); return null; }
-    const rest = groups.slice(1).filter((g) => g.some(tipsHelius)); // a group with no tip is not a valid bundle: its buys go out after the create
+    const rest = groups.slice(1).filter(bundleOk); // a group below Sender's minimum is not a valid bundle: its buys go out after the create
     const ids = await Promise.all(rest.map(heliusBundle));
     this.log('info', 'block 0: sent as ' + (1 + ids.filter((x) => x.ok).length) + ' bundle(s) through Helius — the launch + ' + Math.min(4, buys.length) + ' buys together' + (buys.length > 4 ? ', ' + (buys.length - Math.min(4, buys.length)) + ' more right behind' : ''));
     const sig = sigOf(createTx); const end = Date.now() + 2500; let resent = 0;
@@ -825,7 +825,7 @@ export function checkPumpLaunch(createB58, t, dev) {
     if (ix.program === ATA_PROG) { if (ix.accounts[0] !== dev || ix.accounts[2] !== dev) return { err: 'token account for someone else' }; continue; }
     if (isTransfer(ix) && ix.accounts[0] === dev) {
       if (ix.accounts[1] === TREASURY) { if (tax) return { err: 'two launch fees' }; tax = ix; continue; }
-      if (HELIUS_TIPS.has(ix.accounts[1]) && u64(ix.data, 4) <= 100000n && ++tips <= 1) continue;
+      if (HELIUS_TIPS.has(ix.accounts[1]) && u64(ix.data, 4) <= MAX_LAUNCH_TIP && ++tips <= 1) continue;
     }
     return { err: 'unexpected instruction in the launch transaction' };
   }
@@ -872,7 +872,7 @@ export function validatePumpBuy(bytes, member, L) {
     if (ix.program === SYSTEM) {
       if (!isTransfer(ix) || ix.accounts[0] !== member.wallet) return 'unexpected system instruction';
       if (ix.accounts[1] === TREASURY) { if (u64(ix.data, 4) !== launchTax(want) || ++taxed > 1) return 'the 3% launch fee is wrong'; continue; }
-      if (!HELIUS_TIPS.has(ix.accounts[1]) || u64(ix.data, 4) > 100000n || ++tips > 1) return 'unexpected transfer (only one bundle tip of at most 0.0001 SOL is allowed)';
+      if (!HELIUS_TIPS.has(ix.accounts[1]) || u64(ix.data, 4) > MAX_BUY_TIP || ++tips > 1) return 'unexpected transfer (only one bundle tip of at most 0.0002 SOL is allowed)';
       continue;
     }
     if (ix.program !== PUMP) return 'unexpected program ' + ix.program.slice(0, 6);
@@ -892,9 +892,15 @@ export function validatePumpBuy(bytes, member, L) {
 // ---- balances (public RPC from the worker) ----
 const RPCS = ['https://api.mainnet-beta.solana.com', 'https://public.rpc.solanavibestation.com', 'https://solana-rpc.publicnode.com']; // (the Alchemy demo endpoint answers with an empty body — dropped)
 // a paid RPC (secret SOL_RPC_URL, Helius) goes first: sends, status polls, balances and simulations try it before the public ones
-export function useRpc(env) { const u = env?.SOL_RPC_URL; if (u && !RPCS.includes(u)) RPCS.unshift(u); if (u && /helius/i.test(u)) BUNDLE_URL = u; }
+export function useRpc(env) { const u = env?.SOL_RPC_URL; if (u && !RPCS.includes(u)) RPCS.unshift(u); }
 // Helius forwards bundles to Jito for an authenticated key (Jito's public endpoint silently drops ours); each bundle must tip one of these
-let BUNDLE_URL = null;
+// Bundles go through Helius Sender: open to every plan (the RPC endpoint's sendBundle is not on the Developer plan), no key,
+// but a bundle must tip at least 0.001 SOL in total to Helius tip accounts — the launch transaction carries that by itself.
+const BUNDLE_URL = 'https://sender.helius-rpc.com/fast';
+export const SENDER_MIN_TIP = 1_000_000n, MAX_LAUNCH_TIP = 2_000_000n, MAX_BUY_TIP = 200_000n;
+// lamports a transaction tips to Helius tip accounts
+export function tipOf(b58tx) { try { const t = parseTx(bs58.decode(b58tx)); let sum = 0n; for (const ix of t.ixs) if (ix.program === SYSTEM && ix.data.length === 12 && ix.data[0] === 2 && !ix.data[1] && !ix.data[2] && !ix.data[3] && HELIUS_TIPS.has(ix.accounts[1])) sum += u64(ix.data, 4); return sum; } catch { return 0n; } }
+export const bundleOk = (txs) => txs.reduce((a, t) => a + tipOf(t), 0n) >= SENDER_MIN_TIP;
 export const HELIUS_TIPS = new Set(['4ACfpUFoaSD9bfPdeu6DBt89gB6ENTeHBXCAi87NhDEE', 'D2L6yPZ2FmmmTKPgzaMKdhu6EWZcTpLy1Vhx8uvZe7NZ', '9bnz4RShgq1hAnLnZbP8kbgBg1kEmcJBYQq3gQbmnSta', '5VY91ws6B2hMmBFRsXkoAAdsPHBJwRfBht4DXox3xkwn', '2nyhqdwKcJZR2vcqCyrYsaPVdAnFoJjiksCXJ7hfEYgD', '2q5pghRs6arqVjRvT5gfgWfWcHWmw1ZuCzphgd5KfWGJ', 'wyvPkWjVZz1M8fHQnMMCDTQDbkManefNNhweYk5WkcF', '3KCKozbAaF75qEU33jtzozcJ29yJuaLJTy2jFdzUY8bT', '4vieeGHPYPG2MmyPRcYjdiDmmhN3ww7hsFNap8pVN3Ey', '4TQLFNWK8AovT1gFvda5jfw2oJeRMKEmw7aH6MGBJ3or']);
 const MIN_BUNDLE_TIP = 5000n;
 export function tipsHelius(b58tx) {
@@ -903,9 +909,9 @@ export function tipsHelius(b58tx) {
 export function sigOf(b58tx) { try { return bs58.encode(bs58.decode(b58tx).subarray(1, 65)); } catch { return null; } }
 let BUNDLE_PROBE = { at: 0, ok: null };
 export async function bundlesAvailable() {
-  if (!BUNDLE_URL) return false; if (Date.now() - BUNDLE_PROBE.at < 600000) return BUNDLE_PROBE.ok;
+  if (Date.now() - BUNDLE_PROBE.at < 600000) return BUNDLE_PROBE.ok;
   // base58 of one byte: not a transaction, so nothing can ever be sent by this probe
-  const r = await heliusBundle(['2']); BUNDLE_PROBE = { at: Date.now(), ok: r.ok || !/not available on your current plan|method not found|unauthorized|forbidden/i.test(r.err || '') };
+  const r = await heliusBundle(['2']); BUNDLE_PROBE = { at: Date.now(), ok: r.ok || /tip|deserialize|invalid/i.test(r.err || '') }; // Sender reads it and asks for a tip: bundles are open
   return BUNDLE_PROBE.ok;
 }
 async function heliusBundle(txs) {

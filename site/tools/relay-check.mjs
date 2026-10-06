@@ -4,7 +4,7 @@ import { Keypair, Transaction, ComputeBudgetProgram, SystemProgram, PublicKey, T
 import bs58 from 'bs58';
 import { lockIx } from '../src/lock.js';
 import { pumpState, buildCreate, buyIxsFor, tokensFor, altKeysOf, signersOf, templateBad, feeSplitIxs, equalShares, launchTaxIx, TREASURY } from '../src/pump.js';
-import { validatePumpBuy, checkPumpLaunch, amountOf, tipsHelius, buyOrder, checkFeeSplit, checkLock } from '../../relay/src/index.js';
+import { validatePumpBuy, checkPumpLaunch, amountOf, tipsHelius, buyOrder, checkFeeSplit, checkLock, bundleOk, tipOf } from '../../relay/src/index.js';
 const HT = new PublicKey('4ACfpUFoaSD9bfPdeu6DBt89gB6ENTeHBXCAi87NhDEE');
 
 const RPC = 'https://api.mainnet-beta.solana.com';
@@ -26,7 +26,8 @@ const cases = {
   'stale blockhash': [(() => { const t = new Transaction({ feePayer: member.publicKey, recentBlockhash: Keypair.generate().publicKey.toBase58() }); t.add(...buyIxsFor(L.template, member.publicKey, 5e7, 1)); t.sign(member); return t.serialize(); })(), 'blockhash'],
   'sol transfer added': [mk(undefined, member, 5e7, [SystemProgram.transfer({ fromPubkey: member.publicKey, toPubkey: other.publicKey, lamports: 1 })]), 'unexpected'],
   'bundle tip 0.00001 SOL': [mk(undefined, member, 5e7, [SystemProgram.transfer({ fromPubkey: member.publicKey, toPubkey: HT, lamports: 10000 })]), null],
-  'bundle tip too big': [mk(undefined, member, 5e7, [SystemProgram.transfer({ fromPubkey: member.publicKey, toPubkey: HT, lamports: 200000 })]), 'unexpected transfer'],
+  'bundle tip 0.0002 SOL (the most a buy may tip)': [mk(undefined, member, 5e7, [SystemProgram.transfer({ fromPubkey: member.publicKey, toPubkey: HT, lamports: 200000 })]), null],
+  'bundle tip too big': [mk(undefined, member, 5e7, [SystemProgram.transfer({ fromPubkey: member.publicKey, toPubkey: HT, lamports: 200001 })]), 'unexpected transfer'],
   'two bundle tips': [mk(undefined, member, 5e7, [SystemProgram.transfer({ fromPubkey: member.publicKey, toPubkey: HT, lamports: 10000 }), SystemProgram.transfer({ fromPubkey: member.publicKey, toPubkey: HT, lamports: 10000 })]), 'unexpected transfer'],
   'fee recipient swapped': [mk((ixs) => { ixs[1].keys[6] = { ...ixs[1].keys[6], pubkey: other.publicKey }; return ixs; }), /differs|derived/],
   'fee recipient + its account swapped': [mk((ixs) => { ixs[1].keys[6] = { ...ixs[1].keys[6], pubkey: other.publicKey }; ixs[1].keys[7] = { ...ixs[1].keys[7], pubkey: PublicKey.findProgramAddressSync([other.publicKey.toBuffer(), new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA').toBuffer(), new PublicKey('So11111111111111111111111111111111111111112').toBuffer()], new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL'))[0] }; return ixs; }), 'differs'],
@@ -70,6 +71,19 @@ for (const [name, [tx, t, d, want]] of Object.entries(lcases)) { const got = che
 for (const [name, t, d, want] of [['template legit', L.template, D, null], ['template for another coin', { ...L.template, buyKeys: other2.template.buyKeys }, D, 'derives'], ['template made by someone else', L.template, dev2.publicKey.toBase58(), 'creator'], ['template curve swapped', { ...L.template, buyKeys: L.template.buyKeys.map((k, i) => (i === 10 ? { ...k, pubkey: other.publicKey.toBase58() } : k)) }, D, '#11']]) { const got = await templateBad(st, t, d); const ok = want === null ? got === null : got && got.includes(want); if (!ok) bad++; console.log(ok ? 'ok  ' : 'FAIL', name, '→', got); }
 for (const [v, want] of [[0.05, 0.05], [100, 100], [100.01, 0], [-1, 0], ['Infinity', 0], [NaN, 0], ['1e400', 0], ['abc', 0], [0, 0]]) { const ok = amountOf(v) === want; if (!ok) bad++; console.log(ok ? 'ok  ' : 'FAIL', 'amount', String(v), '→', amountOf(v)); }
 for (const [name, tx, want] of [['create with a Helius tip', v0([...built.ixs, SystemProgram.transfer({ fromPubkey: dev.publicKey, toPubkey: HT, lamports: 100000 })]), true], ['create without tip', v0(built.ixs), false], ['tip below 5000 lamports', v0([...built.ixs, SystemProgram.transfer({ fromPubkey: dev.publicKey, toPubkey: HT, lamports: 4000 })]), false], ['buy with tip', bs58.encode(mk(undefined, member, 5e7, [SystemProgram.transfer({ fromPubkey: member.publicKey, toPubkey: HT, lamports: 10000 })])), true]]) { const got = tipsHelius(tx); const ok = got === want; if (!ok) bad++; console.log(ok ? 'ok  ' : 'FAIL', name, '→ tips', got); }
+{ // Helius Sender takes a bundle only with >= 0.001 SOL tipped in total: the launch tx carries it alone; 5 buys at 0.0002 make it
+  const tipped = (l) => v0([...built.ixs, SystemProgram.transfer({ fromPubkey: dev.publicKey, toPubkey: HT, lamports: l })]);
+  const buyT = (l) => bs58.encode(mk(undefined, member, 5e7, [SystemProgram.transfer({ fromPubkey: member.publicKey, toPubkey: HT, lamports: l })]));
+  for (const [name, got, want] of [
+    ['launch tx tipping 0.001 SOL is a valid Sender bundle on its own', bundleOk([tipped(1000000)]), true],
+    ['launch tx tipping 0.0001 SOL (old page) is not', bundleOk([tipped(100000), buyT(10000)]), false],
+    ['5 buys at 0.0002 SOL make a valid follow-up bundle', bundleOk([1, 2, 3, 4, 5].map(() => buyT(200000))), true],
+    ['4 buys at 0.0002 SOL do not', bundleOk([1, 2, 3, 4].map(() => buyT(200000))), false],
+    ['tipOf reads the tip', tipOf(tipped(1234567)) === 1234567n, true],
+    ['launch tx may tip 0.001 SOL', !checkPumpLaunch(tipped(1000000), L.template, D).err?.includes('unexpected instruction'), true],
+    ['launch tx may not tip 0.003 SOL', !!checkPumpLaunch(tipped(3000000), L.template, D).err?.includes('unexpected instruction'), true],
+  ]) { const ok = got === want; if (!ok) bad++; console.log(ok ? 'ok  ' : 'FAIL', name); }
+}
 { // 4 people: the dev (2 extra wallets) + 3 teammates (2, 1, 0 extra) → the first 3 bundled buys are one per teammate, then round robin
   const L2 = [{ name: 'dev-2', person: 0, rank: 1 }, { name: 'dev-3', person: 0, rank: 2 }];
   const M2 = [{ name: 'A', person: 1, rank: 0 }, { name: 'A-2', person: 1, rank: 1 }, { name: 'A-3', person: 1, rank: 2 }, { name: 'B', person: 2, rank: 0 }, { name: 'B-2', person: 2, rank: 1 }, { name: 'C', person: 3, rank: 0 }];
