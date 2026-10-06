@@ -24,8 +24,13 @@ export class Stats {
         case 'visit': {
           const v = String(b.v || '').slice(0, 40); if (!/^[a-z0-9]{8,40}$/.test(v)) return new Response('bad', { status: 400 });
           inc('visits');
+          // today's uniques are exact (one key per visitor per day, deleted once the day is over); all-time uniques are a
+          // HyperLogLog estimate (~1.6%) in one fixed-size record, so nothing grows with every visitor ever seen
           if (!(await S.get('uv:' + d + ':' + v))) { await S.put('uv:' + d + ':' + v, 1); c.uniques = (c.uniques || 0) + 1; }
-          if (!(await S.get('v:' + v))) { await S.put('v:' + v, Date.now()); tot.uniques = (tot.uniques || 0) + 1; }
+          const h = await hllLoad(S); const migrating = await pruneVisits(S, d, h); // true while old per-visitor keys remain
+          const fresh = await hllAdd(h, v); await S.put('hll', hllPack(h));
+          if (migrating) { if (fresh && !(await S.get('v:' + v))) tot.uniques = (tot.uniques || 0) + 1; } // exact until the fold-in is done
+          else tot.uniques = hllCount(h);
           break;
         }
         case 'signin': inc('signins'); if (b.isNew) inc('newAccounts'); break;
@@ -84,6 +89,34 @@ export class Stats {
     }
     return new Response('not found', { status: 404 });
   }
+}
+
+// ---- visitor storage ----
+// HyperLogLog, 4096 registers: hash = SHA-256(visitor id); 12 bits pick the register, the rest give the rank
+const HLL_P = 12, HLL_M = 1 << HLL_P;
+async function hllLoad(S) { const b = await S.get('hll'); return b ? Uint8Array.from(atob(b), (ch) => ch.charCodeAt(0)) : new Uint8Array(HLL_M); }
+const hllPack = (h) => btoa(String.fromCharCode(...h));
+async function hllAdd(h, v) {
+  const x = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(v)));
+  const idx = ((x[0] << 8) | x[1]) >>> (16 - HLL_P); let rank = 1, bit = 16 - HLL_P - 1, byte = 1; // the bits after the index
+  for (;;) { if (bit < 0) { byte++; bit = 7; if (byte >= 32) break; } if ((x[byte] >> bit) & 1) break; rank++; bit--; }
+  if (rank > h[idx]) { h[idx] = rank; return true; } return false;
+}
+export function hllCount(h) {
+  let sum = 0, zeros = 0; for (const r of h) { sum += 2 ** -r; if (!r) zeros++; }
+  const e = (0.7213 / (1 + 1.079 / HLL_M)) * HLL_M * HLL_M / sum;
+  return Math.round(e <= 2.5 * HLL_M && zeros ? HLL_M * Math.log(HLL_M / zeros) : e);
+}
+export { hllAdd, hllLoad, hllPack };
+// a little cleanup per visit: per-day keys from earlier days, and the old one-key-per-visitor records (folded into the HLL)
+// returns true while old per-visitor keys remain (the caller keeps counting exactly until then)
+async function pruneVisits(S, today, h) {
+  const old = await S.list({ prefix: 'uv:', end: 'uv:' + today, limit: 128 }); if (old.size) await S.delete([...old.keys()]);
+  for (let i = 0; i < 4; i++) { // up to 512 old keys per visit
+    const legacy = await S.list({ prefix: 'v:', limit: 128 }); if (!legacy.size) return false;
+    for (const k of legacy.keys()) await hllAdd(h, k.slice(2)); await S.delete([...legacy.keys()]);
+  }
+  return (await S.list({ prefix: 'v:', limit: 1 })).size > 0;
 }
 
 // every landed launch, newest first ({t, mint}); started from the dashboard's recent list the first time it is read

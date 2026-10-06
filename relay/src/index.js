@@ -61,6 +61,7 @@ const JITO = ['https://mainnet.block-engine.jito.wtf', 'https://ny.mainnet.block
 const regionName = (u) => u.replace('https://', '').split('.')[0];
 const MAX_TX = 5;
 const MAX_MEMBERS = 20; // people in one lobby, dev included (pump.fun fee sharing takes 10; the rest just buy)
+const LOBBY_IDLE_MS = 7 * 86400000; // a lobby nobody has opened for a week is deleted (its code becomes free again)
 const MAX_LOCK_S = 7 * 86400 + 2 * 3600; // the page offers 1 h / 24 h / 7 days after go-live; nothing longer is ever signed
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const json = (o, s = 200) => new Response(JSON.stringify(o), { status: s, headers: { 'content-type': 'application/json', 'access-control-allow-origin': '*' } });
@@ -250,7 +251,7 @@ export class Lobby {
   async fetch(req) {
     if (new URL(req.url).pathname === '/lastbundle') { const b = await this.ctx.storage.get('lastBundle'); return new Response(JSON.stringify(b || null), { headers: { 'content-type': 'application/json' } }); }
     const u = new URL(req.url);
-    if (u.pathname === '/init') { if (this.code) return json({ error: 'exists' }, 409); const b = await req.json(); this.code = b.code; this.chain = b.chain === 'rh' ? 'rh' : 'sol'; await this.persist(); return json({ ok: true }); }
+    if (u.pathname === '/init') { if (this.code) return json({ error: 'exists' }, 409); const b = await req.json(); this.code = b.code; this.chain = b.chain === 'rh' ? 'rh' : 'sol'; await this.persist(); await this.keepAlive(); return json({ ok: true }); }
     if (req.headers.get('upgrade') === 'websocket') {
       if (!this.code) return json({ error: 'no such lobby' }, 404); // only lobbies opened through /lobby/create exist
       const pair = new WebSocketPair(); const [client, server] = Object.values(pair);
@@ -313,7 +314,7 @@ export class Lobby {
           const prev = this.members.get(wallet); if (!prev && b.role !== 'dev') await record(this.env, 'join');
           if (prev?.ws && prev.ws !== ws) { try { prev.ws.serializeAttachment({ wallet: null }); prev.ws.close(1000, 'replaced'); } catch {} }
           const m = { wallet, name: String(b.name || short(wallet)).slice(0, 24), amount: amountOf(b.amount), extra: extraOf(b.extra), ready: !!b.ready, ws, role: wallet === this.dev ? 'dev' : 'member' };
-          this.members.set(wallet, m); this.attach(m);
+          this.members.set(wallet, m); this.attach(m); await this.keepAlive();
           this.log('info', (m.role === 'dev' ? 'dev ' : '') + m.name + ' joined' + (m.role === 'member' ? ' · ' + m.amount + (this.evm ? ' ETH' : ' SOL') : ''));
           await this.pushRoster();
           const L = await this.launchState();
@@ -327,7 +328,7 @@ export class Lobby {
         case 'kick': if (!me || me.wallet !== this.dev) return; { const k = this.members.get(String(b.wallet)); if (k && k.wallet !== this.dev) { await this.ctx.storage.put('ban:' + k.wallet, Date.now()); try { k.ws?.serializeAttachment({ wallet: null }); k.ws?.close(1000, 'kicked'); } catch {} this.members.delete(k.wallet); this.log('info', k.name + ' was removed'); await this.pushRoster(); } } return;
         case 'abort': {
           if (!me || me.wallet !== this.dev) return; if (!(await this.launchState())) return;
-          await this.clearLaunch(); await this.ctx.storage.deleteAlarm(); this.log('warn', 'launch aborted by the dev'); return this.pushRoster();
+          await this.clearLaunch(); this.log('warn', 'launch aborted by the dev'); return this.pushRoster();
         }
         case 'launch': {
           if (!me || me.wallet !== this.dev) return this.send(ws, { t: 'error', msg: 'only the dev can launch' });
@@ -453,8 +454,20 @@ export class Lobby {
   }
 
   async assembleSafe() { try { await this.assemble(); } catch (e) { this.log('error', 'launch failed inside the relay: ' + String(e.message || e).slice(0, 200)); this.broadcast({ t: 'result', ok: false, ids: [], landed: 0, error: String(e.message || e).slice(0, 200) }); await this.pushRoster(); } }
-  async alarm() { this.hydrate(); const L = await this.launchState(); if (L?.fireAt && L.fireAt - Date.now() > 300) { await this.ctx.storage.setAlarm(L.fireAt); return; } await this.assembleSafe(); }
-  async clearLaunch() { await this.ctx.storage.delete('launch'); for (const p of ['signed:', 'signedx:', 'locks:']) { const m = await this.ctx.storage.list({ prefix: p }); for (const k of m.keys()) await this.ctx.storage.delete(k); } }
+  async alarm() {
+    this.hydrate(); const L = await this.launchState();
+    if (!L) return this.expire(); // no launch pending: the alarm is the idle clock
+    if (L.fireAt && L.fireAt - Date.now() > 300) { await this.ctx.storage.setAlarm(L.fireAt); return; } await this.assembleSafe();
+  }
+  async clearLaunch() { await this.ctx.storage.delete('launch'); for (const p of ['signed:', 'signedx:', 'locks:']) { const m = await this.ctx.storage.list({ prefix: p }); for (const k of m.keys()) await this.ctx.storage.delete(k); } await this.keepAlive(); }
+  // the idle clock: someone was here now. Never touches the alarm while a launch is pending (that alarm fires the launch).
+  async keepAlive() { await this.ctx.storage.put('seen', Date.now()); if (!(await this.launchState())) await this.ctx.storage.setAlarm(Date.now() + LOBBY_IDLE_MS); }
+  // a week with nobody connected and no launch pending: delete everything (bans, last bundle, dev seat); the code is free again
+  async expire() {
+    const seen = (await this.ctx.storage.get('seen')) || 0;
+    if (this.ctx.getWebSockets().length || Date.now() - seen < LOBBY_IDLE_MS - 60000) { await this.ctx.storage.setAlarm(Math.max(seen + LOBBY_IDLE_MS, Date.now() + 3600000)); return; }
+    await this.ctx.storage.deleteAll(); this.code = null; this.dev = null; this.members = new Map(); this.policy = { waitMs: 8000 }; this.chain = 'sol';
+  }
 
   // Robinhood/Pons: broadcast the launch, wait for its receipt, THEN fan out the members' pre-signed buys.
   // (Never before: a buy sent to a curve address that doesn't exist yet would just donate the ETH to an empty address.)

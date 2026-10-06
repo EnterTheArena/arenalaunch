@@ -86,6 +86,29 @@ async function codeOk(env, S, email, ticket, code) {
   return { rec: c, key };
 }
 
+// ---- the owner's account numbers, kept as a running summary ('sum') so the dashboard never scans every record ----
+// test accounts (vault 'blob1' / 'stale', written by tools/account-check.mjs) are left out, as before
+const counted = (rec) => !!rec && rec.vault !== 'blob1' && rec.vault !== 'stale';
+async function adjustSum(S, id, before, after) {
+  const sum = await S.get('sum'); if (!sum) return; // not seeded yet: the first dashboard read builds it from a full scan
+  const day = (r) => new Date(r.created || 0).toISOString().slice(0, 10);
+  if (counted(before)) { sum.total--; if (before.vault) sum.withWallets--; const d = day(before); sum.byDay[d] = (sum.byDay[d] || 1) - 1; if (!sum.byDay[d]) delete sum.byDay[d]; }
+  if (counted(after)) { sum.total++; if (after.vault) sum.withWallets++; const d = day(after); sum.byDay[d] = (sum.byDay[d] || 0) + 1; }
+  if (!before && after) sum.latest = [id, ...sum.latest.filter((x) => x !== id)].slice(0, 60);
+  if (!after) sum.latest = sum.latest.filter((x) => x !== id);
+  await S.put('sum', sum);
+}
+const ABANDONED_MS = 30 * 86400000; // a wallet account that never saved anything: gone after 30 days (signing in again recreates it)
+// a few records per sign-in, round-robin: delete wallet accounts with nothing saved (no vault), plus stale email code/send records
+async function prune(S) {
+  const now = Date.now(); const cur = (await S.get('prunecur')) || 'w:';
+  const page = await S.list({ prefix: 'w:', start: cur, limit: 40 }); let last = null;
+  for (const [k, rec] of page) { last = k; if (!rec.vault && now - (rec.seen || rec.created || 0) > ABANDONED_MS) { await S.delete(k); await adjustSum(S, k, rec, null); } }
+  await S.put('prunecur', page.size < 40 || !last ? 'w:' : last + ' ');
+  for (const [k, q] of await S.list({ prefix: 'q:', limit: 40 })) if (!(q.sends || []).some((t) => now - t < 3600000)) await S.delete(k);
+  for (const [k, c] of await S.list({ prefix: 'c:', limit: 40 })) if (now > c.exp) await S.delete(k);
+}
+
 // One Durable Object holds every account (small records, strictly serialized writes).
 export class Accounts {
   constructor(ctx, env) { this.ctx = ctx; this.env = env; }
@@ -113,7 +136,9 @@ export class Accounts {
         const old = await S.list({ prefix: 'n:', limit: 100 }); for (const [k, t] of old) if (Date.now() - t > NONCE_MS * 2) await S.delete(k);
       } else return out({ error: 'this page is out of date — reload it to sign in' }, 400); // the old fixed-message sign-in is gone
       const id = 'w:' + a; let rec = await S.get(id);
-      const isNew = !rec; if (!rec) { rec = { kind: 'wallet', name: a, vault: null, ver: 0, created: Date.now() }; await S.put(id, rec); }
+      const isNew = !rec; if (!rec) { rec = { kind: 'wallet', name: a, vault: null, ver: 0, created: Date.now() }; await S.put(id, rec); await adjustSum(S, id, null, rec); }
+      else if (!rec.vault) { rec.seen = Date.now(); await S.put(id, rec); } // nothing saved yet: keep it off the prune list while it is used
+      await prune(S);
       await record(this.env, 'signin', { isNew });
       return view(id, rec);
     }
@@ -144,16 +169,21 @@ export class Accounts {
           await S.put(id, rec); return out({ error: 'wrong password' }, 401);
         }
         if (rec.fails || rec.lockUntil) { rec.fails = 0; rec.lockUntil = 0; await S.put(id, rec); }
-      } else { rec = { kind: 'email', name: email, auth: h, vault: null, ver: 0, created: Date.now() }; await S.put(id, rec); }
+      } else { rec = { kind: 'email', name: email, auth: h, vault: null, ver: 0, created: Date.now() }; await S.put(id, rec); await adjustSum(S, id, null, rec); }
       await S.delete(c.key); // the code is used up
       await record(this.env, 'signin', { isNew });
       return view(id, rec);
     }
     if (op === 'count') {
-      const byDay = {}; let total = 0, withWallets = 0; const latest = [];
-      for (const [, rec] of [...(await S.list({ prefix: 'w:' })), ...(await S.list({ prefix: 'e:' }))]) { if (rec.vault === 'blob1' || rec.vault === 'stale') continue; total++; if (rec.vault) withWallets++; latest.push({ created: rec.created || 0, wallet: rec.kind === 'email' ? rec.name.replace(/^(.).*@/, '$1…@') : rec.name.slice(0, 4) + '…' + rec.name.slice(-4), saved: !!rec.vault }); const d = new Date(rec.created || 0).toISOString().slice(0, 10); byDay[d] = (byDay[d] || 0) + 1; }
-      latest.sort((x, y) => y.created - x.created);
-      return out({ total, withWallets, byDay, latest: latest.slice(0, 25) });
+      let sum = await S.get('sum');
+      if (!sum) { // first read: one full scan seeds the running summary; from then on sign-ins and saves keep it current
+        sum = { total: 0, withWallets: 0, byDay: {}, latest: [] }; const all = [];
+        for (const [id, rec] of [...(await S.list({ prefix: 'w:' })), ...(await S.list({ prefix: 'e:' }))]) { if (!counted(rec)) continue; sum.total++; if (rec.vault) sum.withWallets++; const d = new Date(rec.created || 0).toISOString().slice(0, 10); sum.byDay[d] = (sum.byDay[d] || 0) + 1; all.push([rec.created || 0, id]); }
+        sum.latest = all.sort((x, y) => y[0] - x[0]).slice(0, 60).map((x) => x[1]); await S.put('sum', sum);
+      }
+      const recs = await S.get(sum.latest.slice(0, 60)); const latest = [];
+      for (const id of sum.latest) { const rec = recs.get(id); if (!counted(rec)) continue; latest.push({ created: rec.created || 0, wallet: rec.kind === 'email' ? rec.name.replace(/^(.).*@/, '$1…@') : rec.name.slice(0, 4) + '…' + rec.name.slice(-4), saved: !!rec.vault }); if (latest.length === 25) break; }
+      return out({ total: sum.total, withWallets: sum.withWallets, byDay: sum.byDay, latest });
     }
     if (op === 'vault' || op === 'save') {
       const id = await readSession(this.env, b.session); if (!id) return out({ error: 'session expired — log in again' }, 401);
@@ -162,7 +192,7 @@ export class Accounts {
       // 64 KB holds a few hundred wallets; an account that is already bigger (saved under the old cap) may keep saving at its size
       const v = String(b.vault || ''); if (v.length > 65536 && v.length > String(rec.vault || '').length) return out({ error: 'too many saved wallets — remove some first' }, 413);
       if (Number(b.ver) !== (rec.ver || 0)) return out({ error: 'your wallets changed in another tab — reload to get the latest', ver: rec.ver || 0, conflict: true }, 409);
-      rec.vault = v; rec.ver = (rec.ver || 0) + 1; rec.saved = Date.now(); await S.put(id, rec);
+      const before = { ...rec }; rec.vault = v; rec.ver = (rec.ver || 0) + 1; rec.saved = Date.now(); await S.put(id, rec); await adjustSum(S, id, before, rec);
       return out({ ver: rec.ver });
     }
     return out({ error: 'not found' }, 404);
