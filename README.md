@@ -34,13 +34,13 @@ node tools/dev.mjs            # http://localhost:5182 (needs site/.secrets.json:
 cd ../relay && npm install && npx wrangler dev   # with DEV=1 in relay/.dev.vars; then RELAY_URL=http://127.0.0.1:8787 node tools/dev.mjs
 ```
 
-Relay settings: `ALLOWED_ORIGINS` and `ADMIN_WALLET` (the wallet allowed into /stats) in wrangler.jsonc, and secrets `SOL_RPC_URL`, `ACCOUNT_SECRET` / `GATE_SECRET`, `RL_KEY`. `DEV` (local only, never in production) lets localhost origins and sign-in messages through. Without `GATE_SECRET` the relay refuses everything (fails closed).
+Relay settings: `ALLOWED_ORIGINS` and `ADMIN_WALLET` (the wallet allowed into /stats) in wrangler.jsonc, and secrets `SOL_RPC_URL`, `ACCOUNT_SECRET` (signs sessions, nonces, email codes and password hashes; required), `GATE_SECRET` (the public site gate only), `RL_KEY`, and for email sign-in `RESEND_API_KEY` + `EMAIL_FROM`. `DEV` (local only, never in production) lets localhost origins and sign-in messages through. Without `GATE_SECRET` the relay refuses everything (fails closed).
 
 Private transfers (Husher): the page pays the 2% fee to the treasury first, as its own transaction; `/api/husher` makes the order only after reading that payment on chain (confirmed, under 30 minutes old, enough for the amount) and reserving its signature at the relay's `/fee/claim` (`RL_KEY`), so one payment buys one order. The fee constants live in `site/api/_fees.js`, shared by the page and the function.
 
 Vault keys: a Phantom account's vault key is SHA-256(signature over the fixed unlock message ‖ a per-account pepper). The relay hands the pepper out only with a fresh Sign In With Solana, never with a session alone. Vaults sealed before the pepper are re-sealed on the next sign-in. Across a reload the key is a non-extractable CryptoKey in IndexedDB, not bytes in sessionStorage.
 
-The site's proxies (`/api/sol` on the `SOL_RPC_URL` Helius key, `/api/husher` on `HUSHER_KEY`, `/api/ipfs`, `/api/pump`) answer signed-in users only: the page sends the account session as `x-session`. The site checks it itself when it has the relay's `ACCOUNT_SECRET` (or `GATE_SECRET` when the relay uses that), else asks the relay's `/session/check` with `RL_KEY`.
+The site's proxies (`/api/sol` on the `SOL_RPC_URL` Helius key, `/api/husher` on `HUSHER_KEY`, `/api/ipfs`, `/api/pump`) answer signed-in users only: the page sends the account session as `x-session`. The site checks it itself with the relay's `ACCOUNT_SECRET` (set on Vercel too), else asks the relay's `/session/check` with `RL_KEY`. It never uses `GATE_SECRET` for sessions.
 
 Email sign-in (code + password) needs two more relay secrets: `RESEND_API_KEY` (resend.com, with your sending domain verified) and `EMAIL_FROM` (e.g. `arenalaunch <login@arenalaunch.bond>`). Without them the email form answers "email sign-in is not set up yet" and nothing else changes. The password is stretched in the browser and never sent; a forgotten password cannot be reset, by anyone, because it also locks the saved wallets.
 
