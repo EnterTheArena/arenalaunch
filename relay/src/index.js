@@ -529,11 +529,13 @@ export class Lobby {
     if (!id0.ok) { this.log('warn', 'block 0: bundle refused by Helius (' + id0.err + ') — sending the plain way'); return null; }
     const rest = groups.slice(1).filter(bundleOk); // a group below Sender's minimum is not a valid bundle: its buys go out after the create
     const ids = await Promise.all(rest.map(heliusBundle));
+    // the buys that really went out inside a bundle (the rest are sent the moment the create lands, without waiting)
+    const inBundle = new Set([...groups[0], ...rest.filter((g, i) => ids[i]?.ok).flat()].map(sigOf));
     this.log('info', 'block 0: sent as ' + (1 + ids.filter((x) => x.ok).length) + ' bundle(s) through Helius — the launch + ' + Math.min(BUNDLE_MAX - 1, buys.length) + ' buys together' + (buys.length > BUNDLE_MAX - 1 ? ', ' + (buys.length - Math.min(BUNDLE_MAX - 1, buys.length)) + ' more right behind' : ''));
     const sig = sigOf(createTx); const end = Date.now() + 2500; let resent = 0;
     while (Date.now() < end) {
       await sleep(150);
-      const st = (await statusesOf([sig]))?.[0]; if (st) return { st0: st };
+      const st = (await statusesOf([sig]))?.[0]; if (st) return { st0: st, inBundle };
       if (Date.now() > end - 2500 + 800 * (resent + 1) && resent < 2) { resent++; heliusBundle(groups[0]).catch(() => {}); }
     }
     // the buys are NOT sent here: a buy that reaches a leader before the create fails ("the coin does not exist yet"). The
@@ -623,9 +625,14 @@ export class Lobby {
       if (!sigs) { sigs = await Promise.all(buys.map((raw) => sendRaw(raw))); this.log('info', 'wallet buys sent: ' + sigs.filter(Boolean).length + '/' + buys.length + ' accepted by the RPCs'); }
       else if (bundled) {
         // bundled buys normally land with the create; any not seen ~1 s after it go out the plain way (same signature: lands once at most)
-        if (!bundled.plain) await sleep(1000); const seen = await statusesOf(sigs); // after a plain fallback: no wait, the create is in
-        const late = buys.map((raw, i) => (seen?.[i] ? null : raw)).filter(Boolean);
-        if (late.length) { await Promise.all(late.map((raw) => sendRaw(raw))); this.log('info', late.length + ' buy(s) were not in the bundles — sent the plain way'); }
+        // buys that were in no bundle go out NOW (the create is in); bundled ones get ~1 s to show up before a plain resend
+        const loose = bundled.plain || !bundled.inBundle ? buys : buys.filter((raw) => !bundled.inBundle.has(sigOf(raw)));
+        if (loose.length) { await Promise.all(loose.map((raw) => sendRaw(raw))); this.log('info', loose.length + ' buy(s) were not in a bundle — sent the moment the create landed'); }
+        if (!bundled.plain && loose.length < buys.length) {
+          await sleep(1000); const seen = await statusesOf(sigs);
+          const late = buys.filter((raw, i) => !seen?.[i] && !loose.includes(raw));
+          if (late.length) { await Promise.all(late.map((raw) => sendRaw(raw))); this.log('info', late.length + ' bundled buy(s) did not show up — sent the plain way'); }
+        }
       }
       const sts = await Promise.all(sigs.map((sg) => (sg ? waitProcessed(sg, 25000) : null)));
       sts.forEach((st, i) => { const ok = !!(st && !st.err); if (ok) landedN++; results.push({ name: names[i], ok, slot: st?.slot || null, err: st?.err ? JSON.stringify(st.err).slice(0, 80) : (sigs[i] ? 'not processed' : 'rpc refused') }); ids.push(sigs[i] || null); this.log(ok ? 'success' : 'warn', names[i] + ': ' + (ok ? 'IN at slot ' + st.slot + (st.slot === slot ? ' (block 0)' : ' (+' + (st.slot - slot) + ')') : 'MISSED — ' + results[results.length - 1].err + (L.fire !== 'safe' && /Custom|InstructionError/.test(results[results.length - 1].err) ? ' (reached the leader before the coin existed)' : ''))); });
