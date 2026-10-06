@@ -82,5 +82,32 @@ for (let i = 0; i < 5; i++) await call0('email-check', { email, ticket: atk.tick
 r = await call0('email-check', { email, ticket: mine, code: myCode }); ok(r.status === 200, 'another browser burning its guesses leaves my code working');
 r = await call0('email-check', { email, ticket: atk.ticket, code: myCode }); ok(r.status >= 400, 'my code does not work with someone else\'s ticket');
 
+// ---- sessions have their own secret (ACCOUNT_SECRET); GATE_SECRET signs nothing account-related any more ----
+{
+  const { createHmac } = await import('crypto');
+  const gateEnv = { GATE_SECRET: 'gate-secret', RESEND_API_KEY: 'x', EMAIL_FROM: 'a@b.io', STATS: env.STATS };
+  const G = new Accounts({ storage }, gateEnv); let threw = false; try { await G.fetch(new Request('https://acct/nonce', { method: 'POST', body: '{}' })); } catch { threw = true; }
+  ok(threw && (await readSession(gateEnv, 'x.y')) === null, 'no ACCOUNT_SECRET: no sessions or nonces at all (GATE_SECRET is not a fallback)');
+  // a session the way the old relay signed it (GATE_SECRET): refused by the relay and by the site's local check
+  const body = Buffer.from('w:11111111111111111111111111111112|' + (Date.now() + 86400000)).toString('base64url');
+  const forged = body + '.' + createHmac('sha256', 'gate-secret:account-session').update(body).digest('base64url');
+  ok((await readSession({ ...env, GATE_SECRET: 'gate-secret' }, forged)) === null, 'a session signed with GATE_SECRET is refused by the relay');
+  process.env.ACCOUNT_SECRET = env.ACCOUNT_SECRET; process.env.GATE_SECRET = 'gate-secret'; delete process.env.RL_KEY;
+  const { signedIn } = await import('../api/_session.js'); let st = 0; const res = { status(x) { st = x; return this; }, json() { return this; } };
+  ok((await signedIn({ headers: { 'x-session': forged } }, res)) === null && st === 401, '...and by the site (it never checks sessions with GATE_SECRET)');
+  // an email account whose password hash was keyed with GATE_SECRET (before ACCOUNT_SECRET existed)
+  const env2 = { ...env, GATE_SECRET: 'gate-secret' }; const A2 = new Accounts({ storage }, env2);
+  const em = 'legacy@example.com', k = await emailKeys(em, 'legacy password 1');
+  const hm = (key, msg) => createHmac('sha256', key).update(msg).digest('base64url');
+  await storage.put('e:' + em, { kind: 'email', name: em, auth: hm('gate-secret:account-session', 'email-auth:' + em + ':' + k.auth), vault: null, ver: 0, created: Date.now() });
+  const c2 = async (op, b) => { const r = await A2.fetch(new Request('https://acct/' + op, { method: 'POST', body: JSON.stringify(b) })); return { status: r.status, ...(await r.json()) }; };
+  clock.now += 3600000; let t = (await c2('email-start', { email: em })).ticket; let code = lastCode();
+  const bad = await emailKeys(em, 'not the password');
+  ok((await c2('email-login', { email: em, ticket: t, code, auth: bad.auth })).status === 401, 'legacy email account: a wrong password is still refused');
+  const good = await c2('email-login', { email: em, ticket: t, code, auth: k.auth });
+  ok(good.status === 200 && good.id === 'e:' + em, 'legacy email account: the right password still signs in');
+  ok((await storage.get('e:' + em)).auth === hm('test-secret:account-session', 'email-auth:' + em + ':' + k.auth), '...and its hash is re-keyed under ACCOUNT_SECRET');
+}
+
 Date.now = realNow;
 console.log(fails ? fails + ' FAILED' : 'all email sign-in checks passed'); process.exit(fails ? 1 : 0);

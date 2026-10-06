@@ -130,7 +130,7 @@ export default {
     const acct = /^\/account\/(nonce|wallet|vault|save|email-start|email-check|email-login)$/.exec(u.pathname);
     if (acct && req.method === 'POST') {
       if (!(await gateOk(env, req.headers.get('x-gate') || cookieToken(req)))) return json({ error: 'gate' }, 401);
-      if (!env.ACCOUNT_SECRET && !env.GATE_SECRET) return json({ error: 'accounts are not configured' }, 503); // never sign sessions with an empty key
+      if (!env.ACCOUNT_SECRET) return json({ error: 'accounts are not configured' }, 503); // never sign sessions with an empty key (nor the gate's)
       if (await overLimit(env, ipOf(req), 'acct-' + acct[1], ...ACCT_LIMITS[acct[1]])) return new Response(JSON.stringify({ error: 'too many requests — wait a minute' }), { status: 429, headers: { 'content-type': 'application/json', ...cors(env, req) } });
       const r = await env.ACCOUNTS.get(env.ACCOUNTS.idFromName('all')).fetch('https://acct/' + acct[1], { method: 'POST', body: await req.text() });
       return new Response(await r.text(), { status: r.status, headers: { 'content-type': 'application/json', ...cors(env, req) } });

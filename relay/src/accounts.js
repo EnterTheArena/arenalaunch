@@ -29,8 +29,11 @@ const b64u = (bytes) => btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').
 async function hmac(secret, msg) { const k = await crypto.subtle.importKey('raw', te.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']); return b64u(new Uint8Array(await crypto.subtle.sign('HMAC', k, te.encode(msg)))); }
 const eq = (a, b) => { if (a.length !== b.length) return false; let d = 0; for (let i = 0; i < a.length; i++) d |= a.charCodeAt(i) ^ b.charCodeAt(i); return d === 0; };
 const SESSION_MS = 30 * 86400000;
-// fail closed: with no secret configured nothing can mint or read a session (an empty key would let anyone forge one)
-const secretOf = (env) => { const s = env.ACCOUNT_SECRET || env.GATE_SECRET; if (!s) throw new Error('accounts are not configured'); return s + ':account-session'; };
+// Sessions, nonces, email codes and email password hashes are keyed with ACCOUNT_SECRET, which only the relay and the
+// site's API functions hold (never the site gate's GATE_SECRET). Fail closed: no secret, no accounts.
+const secretOf = (env) => { const s = env.ACCOUNT_SECRET; if (!s) throw new Error('accounts are not configured'); return s + ':account-session'; };
+// email passwords stored before ACCOUNT_SECRET existed were keyed with GATE_SECRET: still accepted, re-keyed on that sign-in
+const legacyAuthHash = (env, email, auth) => (env.GATE_SECRET ? hmac(env.GATE_SECRET + ':account-session', 'email-auth:' + email + ':' + auth) : null);
 
 // ---- Sign In With Solana: "<domain> wants you to sign in with your Solana account:\n<address>\n...\nNonce: …\nIssued At: …"
 // The nonce is ours (HMAC-stamped, 5 minutes, used once) and the domain must be one of this site's, so a signature
@@ -55,7 +58,7 @@ export function readSiws(env, text, address) {
 }
 export async function mintSession(env, id) { const exp = Date.now() + SESSION_MS; const body = b64u(te.encode(id + '|' + exp)); return body + '.' + (await hmac(secretOf(env), body)); }
 export async function readSession(env, token) {
-  if (!env.ACCOUNT_SECRET && !env.GATE_SECRET) return null;
+  if (!env.ACCOUNT_SECRET) return null;
   const [body, mac] = String(token || '').split('.'); if (!body || !mac) return null;
   if (!eq(await hmac(secretOf(env), body), mac)) return null;
   let s; try { s = atob(body.replace(/-/g, '+').replace(/_/g, '/')); } catch { return null; }
@@ -168,6 +171,8 @@ export class Accounts {
       const h = await authHash(this.env, email, auth); const isNew = !rec;
       if (rec) {
         const now = Date.now(); if (rec.lockUntil > now) return out({ error: 'too many wrong passwords — try again in ' + Math.ceil((rec.lockUntil - now) / 60000) + ' min' }, 429);
+        const legacy = !eq(h, rec.auth) && (await legacyAuthHash(this.env, email, auth)); const legacyOk = !!legacy && eq(legacy, rec.auth);
+        if (legacyOk) { rec.auth = h; await S.put(id, rec); } // re-keyed under ACCOUNT_SECRET
         if (!eq(h, rec.auth)) {
           rec.fails = (rec.fails || 0) + 1; if (rec.fails >= PW_FAILS) { rec.fails = 0; rec.lockUntil = now + PW_LOCK_MS; }
           await S.put(id, rec); return out({ error: 'wrong password' }, 401);

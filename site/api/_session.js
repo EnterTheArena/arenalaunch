@@ -1,14 +1,15 @@
 // Who is calling: the account session from Sign In With Solana / email sign-in (minted by the relay), sent by the page as
 // the x-session header. The site's paid proxies (/api/sol on our Helius key, /api/husher on our Husher key, and /api/ipfs,
 // /api/pump) answer signed-in users only, so nobody can use them from a script without an account.
-// Checked here with the shared secret when this deployment has it, else by asking the relay (cached for a minute).
+// Checked here with ACCOUNT_SECRET (the relay's, shared with this deployment) when set, else by asking the relay (cached
+// for a minute). Never with GATE_SECRET: sessions are not signed with it any more.
 // Fails CLOSED: no valid session, no answer. (Files starting with _ are not served by Vercel.)
 import { createHmac, timingSafeEqual } from 'crypto';
 const RELAY = process.env.RELAY_URL || 'https://relay.arenalaunch.bond';
 const cache = new Map(); // token → {id, until}
 
 function local(token) {
-  const secret = process.env.ACCOUNT_SECRET || process.env.GATE_SECRET; if (!secret) return null;
+  const secret = process.env.ACCOUNT_SECRET; if (!secret) return null;
   const [body, mac] = String(token).split('.'); if (!body || !mac) return null;
   const want = Buffer.from(createHmac('sha256', secret + ':account-session').update(body).digest('base64url'));
   const got = Buffer.from(mac); if (want.length !== got.length || !timingSafeEqual(want, got)) return null;
