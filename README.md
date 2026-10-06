@@ -36,6 +36,8 @@ cd ../relay && npm install && npx wrangler dev
 
 Relay settings: `ALLOWED_ORIGINS` (wrangler.jsonc), and secrets `ADMIN_WALLET` (the wallet allowed into /stats), `SOL_RPC_URL`, `ACCOUNT_SECRET` / `GATE_SECRET`, `RL_KEY`.
 
+The site's proxies (`/api/sol` on the `SOL_RPC_URL` Helius key, `/api/husher` on `HUSHER_KEY`, `/api/ipfs`, `/api/pump`) answer signed-in users only: the page sends the account session as `x-session`. The site checks it itself when it has the relay's `ACCOUNT_SECRET` (or `GATE_SECRET` when the relay uses that), else asks the relay's `/session/check` with `RL_KEY`.
+
 Email sign-in (code + password) needs two more relay secrets: `RESEND_API_KEY` (resend.com, with your sending domain verified) and `EMAIL_FROM` (e.g. `arenalaunch <login@arenalaunch.bond>`). Without them the email form answers "email sign-in is not set up yet" and nothing else changes. The password is stretched in the browser and never sent; a forgotten password cannot be reset, by anyone, because it also locks the saved wallets.
 
 ## Checks
@@ -46,6 +48,7 @@ node tools/build-sim.mjs relay-check && node tools/.relay-check.bundle.mjs   # r
 node tools/build-sim.mjs fee-sim && node tools/.fee-sim.bundle.mjs --coin <mint>   # mainnet simulation of a buy + fee
 node tools/lobby-check.mjs     # live lobby rules
 node tools/email-check.mjs     # email sign-in rules (offline)
+node tools/api-gate-check.mjs  # /api/sol, /api/husher, /api/ipfs, /api/pump answer signed-in users only (offline)
 node tools/build-sim.mjs group-check && node tools/.group-check.bundle.mjs   # dev + 3 teammates rehearsal
 ```
 

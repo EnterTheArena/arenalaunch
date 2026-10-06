@@ -1,4 +1,5 @@
 import { limited } from './_limit.js';
+import { signedIn } from './_session.js';
 // POST /api/ipfs {name, symbol, description, website, twitter, telegram, dataUrl} → {imageUrl, metadataUri}
 // Uploads the coin image + metadata through pump.fun's own IPFS endpoint (the one their create page uses, no account
 // needed). metadataUri is what the create instruction carries. Gate enforced by middleware.
@@ -6,7 +7,9 @@ export const config = { api: { bodyParser: { sizeLimit: '4mb' } } };
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'POST only' });
+  const who = await signedIn(req, res); if (!who) return;
   if (await limited(req, res, 'ipfs', 20)) return; // one upload per launch (cached by the page)
+  if (await limited(req, res, 'ipfs-acct', 30, 3600000, who)) return;
   const b = req.body || {};
   const m = /^data:(image\/(png|jpeg|webp|gif));base64,(.+)$/.exec(String(b.dataUrl || ''));
   if (!m) return res.status(400).json({ error: 'PNG, JPEG, WebP or GIF data URL required' });

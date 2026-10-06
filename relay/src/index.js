@@ -108,6 +108,11 @@ export default {
       if (b.bucket) { const bucket = String(b.bucket).replace(/[^a-z0-9_-]/gi, '').slice(0, 24); const over = await overLimit(env, ip, 'site-' + bucket, Math.min(10000, Math.max(1, Number(b.limit) || 60)), Math.min(3600000, Math.max(1000, Number(b.windowMs) || 60000))); return json({ allowed: !over }); }
       return env.RATELIMIT.get(env.RATELIMIT.idFromName('ip:' + ip)).fetch('https://rl/hit', { method: 'POST', body: JSON.stringify({ ok: !!b.ok, limit: 8, windowMs: 15 * 60000 }) });
     }
+    // the site's API functions checking a visitor's account session (server to server, shared RL_KEY)
+    if (req.method === 'POST' && u.pathname === '/session/check') {
+      if (!env.RL_KEY || !(await safeEq(req.headers.get('x-rl-key') || '', env.RL_KEY))) return json({ error: 'forbidden' }, 403);
+      const b = await req.json().catch(() => ({})); return json({ id: await readSession(env, String(b.session || '').slice(0, 512)) });
+    }
     // accounts: one Durable Object holds them all (see accounts.js)
     const acct = /^\/account\/(nonce|wallet|vault|save|email-start|email-check|email-login)$/.exec(u.pathname);
     if (acct && req.method === 'POST') {

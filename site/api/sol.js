@@ -1,15 +1,20 @@
 import { limited } from './_limit.js';
+import { signedIn } from './_session.js';
 // POST /api/sol — Solana JSON-RPC pass-through (public RPCs block/CORS-limit browser calls; some blockers kill them).
-// Body: {method, params}. Read-only methods + sendTransaction. Rotates RPCs on failure. Gate enforced by middleware.
+// Body: {method, params}. Signed-in users only (x-session), and only the methods the page uses. Rotates RPCs on failure.
 const RPCS = [process.env.SOL_RPC_URL, 'https://api.mainnet-beta.solana.com', 'https://public.rpc.solanavibestation.com', 'https://solana-mainnet.g.alchemy.com/v2/demo'].filter(Boolean);
-const ALLOW = new Set(['getBalance', 'getLatestBlockhash', 'getMultipleAccounts', 'getAccountInfo', 'getTokenAccountsByOwner', 'getSignatureStatuses', 'getTransaction', 'sendTransaction', 'simulateTransaction', 'getSlot']);
+const ALLOW = new Set(['getLatestBlockhash', 'getMultipleAccounts', 'getSignatureStatuses', 'sendTransaction', 'simulateTransaction', 'getSlot']);
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'POST only' });
-  if (await limited(req, res, 'sol', 600)) return; // the page polls balances every 20 s; a launch makes a few dozen calls
+  const who = await signedIn(req, res); if (!who) return;
+  // the page polls balances every 20 s and a launch makes a few dozen calls; these are several times that
+  if (await limited(req, res, 'sol', 300)) return;
+  if (await limited(req, res, 'sol-acct', 240, 60000, who)) return;
   const { method, params } = req.body || {};
   if (!ALLOW.has(method)) return res.status(400).json({ error: 'method not allowed' });
-  if (!Array.isArray(params) || JSON.stringify(params).length > 200000) return res.status(400).json({ error: 'params' });
+  if (!Array.isArray(params) || JSON.stringify(params).length > 20000) return res.status(400).json({ error: 'params' });
+  if ((method === 'getMultipleAccounts' && !(Array.isArray(params[0]) && params[0].length <= 100)) || (method === 'getSignatureStatuses' && !(Array.isArray(params[0]) && params[0].length <= 50))) return res.status(400).json({ error: 'params' });
   let last = 'no rpc';
   for (const url of RPCS) {
     try {

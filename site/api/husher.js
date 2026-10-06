@@ -1,4 +1,5 @@
 import { limited, ipOf } from './_limit.js';
+import { signedIn } from './_session.js';
 
 // POST /api/husher — Husher private-transfer proxy (the API key never reaches the browser).
 // Body: { action: 'estimate'|'create'|'status', ... }
@@ -14,7 +15,10 @@ let minCache = { at: 0, min: null };
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'POST only' });
+  const who = await signedIn(req, res); if (!who) return; // signed-in users only: our Husher key is not a public mixer
   if (await limited(req, res, 'husher', 60)) return; // 60 req/min per IP
+  if (await limited(req, res, 'husher-acct', 40, 60000, who)) return;
+  if (req.body?.action === 'create' && await limited(req, res, 'husher-create', 10, 3600000, who)) return; // orders: 10 an hour per account
   if (!KEY()) return res.status(500).json({ error: 'husher not configured' });
 
   const { action } = req.body || {};

@@ -47,8 +47,10 @@ addEventListener('unhandledrejection', (e) => report('page crash: ' + (e.reason?
 
 // ---------------- RPC (through the site's proxy: public RPCs CORS-block browsers and ad-blockers kill them) ----------------
 const tailLogs = (logs) => (logs || []).filter((l) => /failed|Error|error|insufficient/i.test(l)).slice(-3).join(' | ') || (logs || []).slice(-2).join(' | ') || '(no program logs — usually the fee payer has no SOL)';
+// the site's proxies answer signed-in users only: every call carries the account session
+const apiHeaders = () => { if (!A.session) throw new Error('sign in first'); return { 'content-type': 'application/json', 'x-session': A.session }; };
 async function rpc(method, params) {
-  const r = await fetch('/api/sol', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ method, params }) });
+  const r = await fetch('/api/sol', { method: 'POST', headers: apiHeaders(), body: JSON.stringify({ method, params }) });
   const j = await r.json(); if (j.error) { const e = j.error; const logs = e?.data?.logs; throw new Error((typeof e === 'string' ? e : (e.message || 'rpc error')) + (logs?.length ? ' · ' + tailLogs(logs) : '')); } return j.result;
 }
 const getAccounts = async (addrs) => (await rpc('getMultipleAccounts', [addrs, { encoding: 'base64', commitment: 'confirmed' }]))?.value || [];
@@ -370,7 +372,7 @@ async function xferSend() {
 
 // ---------------- Private Transfer (Husher) — integrated into the Send panel ----------------
 async function husher(action, body = {}) {
-  const r = await fetch('/api/husher', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action, ...body }) });
+  const r = await fetch('/api/husher', { method: 'POST', headers: apiHeaders(), body: JSON.stringify({ action, ...body }) });
   const j = await r.json(); if (!r.ok || j.error) throw new Error(j.error || 'Husher error ' + r.status); return j;
 }
 
@@ -576,7 +578,7 @@ const metaKey = () => [L.name, L.symbol, L.description, L.website, L.twitter, L.
 async function metadataUri() {
   if (LOGO?.uri && LOGO.key === metaKey()) return LOGO.uri;
   log('info', 'launch: uploading the image and metadata to IPFS…');
-  const r = await fetch('/api/ipfs', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: L.name.trim(), symbol: L.symbol.trim(), description: L.description, website: L.website, twitter: L.twitter, telegram: L.telegram, dataUrl: LOGO.dataUrl }) });
+  const r = await fetch('/api/ipfs', { method: 'POST', headers: apiHeaders(), body: JSON.stringify({ name: L.name.trim(), symbol: L.symbol.trim(), description: L.description, website: L.website, twitter: L.twitter, telegram: L.telegram, dataUrl: LOGO.dataUrl }) });
   const j = await r.json(); if (!r.ok || !j.metadataUri) throw new Error(j.error || 'metadata upload failed');
   LOGO.uri = j.metadataUri; LOGO.key = metaKey(); ls.set('sq_logo', LOGO); log('info', 'launch: metadata ' + j.metadataUri); return j.metadataUri;
 }
@@ -732,7 +734,7 @@ const pumpOk = () => !!(P.sess && P.sess.address === address() && P.sess.expires
 async function pumpLogin() {
   if (!unlocked()) throw new Error('unlock your wallet first');
   const timestamp = Date.now(); const signature = await signMessage(enc.encode('Sign in to pump.fun: ' + timestamp));
-  const r = await fetch('/api/pump', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'login', address: address(), signature, timestamp }) });
+  const r = await fetch('/api/pump', { method: 'POST', headers: apiHeaders(), body: JSON.stringify({ action: 'login', address: address(), signature, timestamp }) });
   const j = await r.json(); if (!r.ok || !j.jwt) throw new Error(j.error || 'login failed');
   P.sess = { jwt: j.jwt, expiresAt: j.expiresAt, address: address(), profile: j.profile }; ls.set('sq_pump', P.sess);
   log('success', 'pump.fun: signed in as ' + (j.profile?.username || short(address())));
@@ -748,7 +750,7 @@ async function callout(mint, why) {
     const deadline = Date.now() + 180000; let attempt = 0, last = '';
     for (;;) {
       attempt++;
-      const r = await fetch('/api/pump', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'callout', jwt: P.sess.jwt, mint, thesis: P.text.trim() }) });
+      const r = await fetch('/api/pump', { method: 'POST', headers: apiHeaders(), body: JSON.stringify({ action: 'callout', jwt: P.sess.jwt, mint, thesis: P.text.trim() }) });
       const j = await r.json(); last = j.body || j.error || '';
       if (j.ok) { P.last = { at: Date.now(), ok: true, mint }; log('success', 'pump.fun: callout live for ' + short(mint) + (attempt > 1 ? ' (try ' + attempt + ')' : '') + ' — ' + why); return; }
       if (j.expired) { pumpLogout(); throw new Error('pump.fun session expired — sign in again'); }

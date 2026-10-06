@@ -1,4 +1,5 @@
 import { limited } from './_limit.js';
+import { signedIn } from './_session.js';
 // POST /api/pump — pump.fun proxy (their API blocks cross-origin browser calls).
 //   {action:'login', address, signature, timestamp} → {jwt, expiresAt, profile}   (signature = base58 ed25519 over "Sign in to pump.fun: <timestamp>")
 //   {action:'callout', jwt, mint, thesis}          → {ok, status, body, retryable}
@@ -13,6 +14,7 @@ async function profile(address) { try { const r = await fetch(PUMP + '/users/' +
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'POST only' });
+  const who = await signedIn(req, res); if (!who) return;
   if (await limited(req, res, 'pump', 120)) return; // a callout retries every 4 s while pump.fun indexes the coin
   const b = req.body || {};
   try {
