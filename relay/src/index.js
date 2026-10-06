@@ -69,7 +69,7 @@ const short = (a) => (a && a.length > 12 ? a.slice(0, 4) + '…' + a.slice(-4) :
 
 // ---- site gate (shared with the Vercel site): token = base64url(exp) + '.' + base64url(HMAC-SHA256(GATE_SECRET, exp))
 async function gateOk(env, token) {
-  if (!env.GATE_SECRET) return true; // gate disabled until the secret is set
+  if (!env.GATE_SECRET) return false; // fail closed: a missing secret must never open the relay
   const [expB, sigB] = String(token || '').split('.'); if (!expB || !sigB) return false;
   const exp = Number(atob(expB.replace(/-/g, '+').replace(/_/g, '/'))); if (!(exp > Date.now())) return false;
   const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(env.GATE_SECRET), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
