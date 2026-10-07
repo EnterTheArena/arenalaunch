@@ -25,6 +25,7 @@ import { record } from './stats.js';
 import { readSession } from './accounts.js';
 import { pda, ata, text } from './pda.js';
 import { verifyMessage, Transaction as EvmTx, Interface as EvmInterface, getAddress } from 'ethers';
+import { PONS, ROUTER_ABI, FACTORY_ABI, checkPonsLaunch, checkPonsBuy, checkPonsFee, exemptionsBad, frontRun, ethWei, feeWei } from './pons.js';
 
 // ---- Robinhood Chain (Pons v2) ----
 // Squad launch on an EVM chain: no Jito. Pons tokens are CREATE2 (curve address known
@@ -40,21 +41,6 @@ async function rhRpc(method, params) {
 const isEvmAddr = (a) => /^0x[0-9a-fA-F]{40}$/.test(a || '');
 const lc = (a) => String(a || '').toLowerCase();
 async function balancesEvm(wallets) { const out = {}; for (const w of wallets) { try { out[w] = Number(BigInt(await rhRpc('eth_getBalance', [w, 'latest']))) / 1e18; } catch {} } return out; }
-// a member's pre-signed buy must be exactly: curve.buy(amount, minOut, self) with value == amount, from the member, on chain 4663
-export function validateEvmBuy(raw, member, L) {
-  let tx; try { tx = EvmTx.from(raw); } catch { return 'unparseable tx'; }
-  if (Number(tx.chainId) !== RH.chainId) return 'wrong chain';
-  if (!tx.from || lc(tx.from) !== lc(member.wallet)) return 'not signed by your wallet';
-  if (lc(tx.to) !== lc(L.predicted?.curve)) return 'not sent to the launch curve';
-  const want = BigInt(Math.round(member.amount * 1e6)) * 10n ** 12n; // ETH → wei (6-dp precision)
-  if (tx.value !== want) return 'value mismatch (' + tx.value + ' vs ' + want + ')';
-  let d; try { d = RH.curveBuy.parseTransaction({ data: tx.data, value: tx.value }); } catch { return 'not a curve.buy call'; }
-  if (!d || d.name !== 'buy') return 'not a curve.buy call';
-  if (d.args[0] !== want) return 'quoteIn mismatch';
-  if (lc(d.args[2]) !== lc(member.wallet)) return 'recipient is not you';
-  if (tx.gasLimit < 120000n) return 'gas limit too low';
-  return null;
-}
 const evmWei = (eth) => BigInt(Math.round(eth * 1e6)) * 10n ** 12n;
 async function waitReceipt(hash, ms) { const end = Date.now() + ms; while (Date.now() < end) { try { const r = await rhRpc('eth_getTransactionReceipt', [hash]); if (r) return r; } catch {} await sleep(120); } return null; }
 
@@ -245,6 +231,13 @@ export class Lobby {
   }
   async persist() { await this.ctx.storage.put('meta', { code: this.code, dev: this.dev, policy: this.policy, chain: this.chain }); }
   get evm() { return this.chain === 'rh'; }
+  // what a teammate gets asked to sign. Robinhood: the predicted coin/curve AND the dev's launch call itself, so the
+  // teammate's page can check for itself that it is exempt from the snipe tax and that the curve is the one the call makes
+  signMsg(L) {
+    const deadline = L.startedAt + this.policy.waitMs;
+    return L.chain === 'rh' ? { t: 'sign', chain: 'rh', curve: L.predicted.curve, token: L.predicted.token, launch: { from: this.dev, to: PONS.router, data: L.launchData, value: L.launchValue }, deadline, dry: L.dry }
+      : { t: 'sign', template: L.template, tip: L.tip, deadline, dry: L.dry };
+  }
   // rebuild the roster from socket attachments (survives hibernation)
   hydrate() {
     const live = new Set();
@@ -328,7 +321,7 @@ export class Lobby {
           this.log('info', (m.role === 'dev' ? 'dev ' : '') + m.name + ' joined' + (m.role === 'member' ? ' · ' + m.amount + (this.evm ? ' ETH' : ' SOL') : ''));
           await this.pushRoster();
           const L = await this.launchState();
-          if (L && m.role === 'member' && m.ready && m.amount > 0) this.send(ws, L.chain === 'rh' ? { t: 'sign', chain: 'rh', curve: L.predicted.curve, token: L.predicted.token, deadline: L.startedAt + this.policy.waitMs, dry: L.dry } : { t: 'sign', template: L.template, tip: L.tip, deadline: L.startedAt + this.policy.waitMs, dry: L.dry });
+          if (L && m.role === 'member' && m.ready && m.amount > 0) this.send(ws, this.signMsg(L));
           return;
         }
         case 'amount': if (!me) return; if (Number(b.amount) !== 0 && !amountOf(b.amount)) this.send(ws, { t: 'error', msg: 'a buy must be more than 0 and at most 100' }); me.amount = amountOf(b.amount); if ('extra' in b) me.extra = extraOf(b.extra); this.attach(me); await this.ctx.storage.delete('signed:' + me.wallet); return this.pushRoster();
@@ -344,25 +337,34 @@ export class Lobby {
           if (!me || me.wallet !== this.dev) return this.send(ws, { t: 'error', msg: 'only the dev can launch' });
           if (await this.launchState()) return this.send(ws, { t: 'error', msg: 'a launch is already in progress' });
           let L;
-          // the official page launches pump.fun coins only (it refuses to sign anything else), so nothing else is accepted
-          if (this.evm) return this.send(ws, { t: 'error', msg: 'Robinhood Chain launches are switched off' });
-          if (this.evm && b.escrow) {
-            // SAME-BLOCK escrow mode: the dev's single SquadLaunch tx creates the token AND buys for the squad from escrow.
-            // Nothing to sign for members — the relay just tracks the receipt and tells everyone.
-            if (!/^0x[0-9a-f]{64}$/i.test(String(b.launchHash || ''))) return this.send(ws, { t: 'error', msg: 'missing launch tx hash' });
-            await this.clearLaunch();
-            const L0 = { chain: 'rh', escrow: true, launchHash: String(b.launchHash), predicted: b.predicted || {}, buyers: Array.isArray(b.buyers) ? b.buyers : [], dry: false, startedAt: Date.now(), mint: b.predicted?.token || null };
-            await this.ctx.storage.put('launch', L0);
-            this.log('armed', 'SAME-BLOCK LAUNCH sent by ' + me.name + ' — ' + short(L0.launchHash) + ' · ' + L0.buyers.length + ' squad buys from escrow in the same tx · waiting for the receipt…');
-            await this.pushRoster();
-            return this.assembleSafe();
-          }
           if (this.evm) {
-            // Robinhood/Pons: dev sends the signed launch tx (or, with an extension wallet, the hash of one it already broadcast) + the predicted curve
-            if (!b.predicted?.curve || !isEvmAddr(b.predicted.curve) || (!b.launchRaw && !b.launchHash)) return this.send(ws, { t: 'error', msg: 'missing launch tx / predicted curve' });
-            L = { chain: 'rh', predicted: { token: b.predicted.token, curve: getAddress(b.predicted.curve) }, launchRaw: b.launchRaw ? String(b.launchRaw) : null, launchHash: b.launchHash ? String(b.launchHash) : null, localTxs: (Array.isArray(b.localTxs) ? b.localTxs.map(String) : []).filter((r) => { try { const t = EvmTx.from(r); return lc(t.to) === lc(b.predicted.curve) && Number(t.chainId) === RH.chainId; } catch { return false; } }), exemptions: Array.isArray(b.exemptions) ? b.exemptions.map(lc) : [], dry: !!b.dry, startedAt: Date.now(), mint: b.predicted.token || null };
-            const notExempt = this.expected().filter((x) => !L.exemptions.includes(lc(x.wallet)));
-            if (notExempt.length) this.log('warn', 'NOT in the snipe-tax exemptions (they will pay the launch tax): ' + notExempt.map((x) => x.name).join(', '));
+            // Robinhood/Pons (see pons.js): the dev's pre-signed launch + its 3% fee, the dev's other wallets' buys + fees
+            const chk = checkPonsLaunch(b.launchRaw, this.dev); if (chk.err) { this.log('warn', 'launch refused: ' + chk.err); return this.send(ws, { t: 'error', msg: 'launch refused: ' + chk.err }); }
+            const feeBad = checkPonsFee(b.launchFee, this.dev, chk.quoteIn, chk.nonce); if (feeBad) return this.send(ws, { t: 'error', msg: 'launch refused: ' + feeBad });
+            // the coin and curve come from the chain, never from the dev: simulate the very same call
+            let pred, launchFee;
+            try {
+              const [res, fee] = await Promise.all([
+                rhRpc('eth_call', [{ from: this.dev, to: PONS.router, data: chk.tx.data, value: '0x' + chk.value.toString(16) }, 'latest', { [this.dev]: { balance: '0x' + (10n ** 21n).toString(16) } }]),
+                rhRpc('eth_call', [{ to: PONS.factory, data: FACTORY_ABI.encodeFunctionData('launchFee', []) }, 'latest'])]);
+              pred = ROUTER_ABI.decodeFunctionResult('launchAndBuy', res); launchFee = FACTORY_ABI.decodeFunctionResult('launchFee', fee)[0];
+            } catch (e) { this.log('warn', 'launch refused: could not simulate it on Robinhood Chain — ' + String(e.message || e).slice(0, 120)); return this.send(ws, { t: 'error', msg: 'launch refused: the launch would fail on chain (' + String(e.message || e).slice(0, 120) + ')' }); }
+            if (chk.value !== launchFee + chk.quoteIn) return this.send(ws, { t: 'error', msg: 'launch refused: it pays ' + chk.value + ' wei, Pons wants the launch fee ' + launchFee + ' + the dev buy ' + chk.quoteIn });
+            const curve = getAddress(pred[1]), token = getAddress(pred[0]);
+            const locals = [];
+            for (const [i, x] of (Array.isArray(b.localTxs) ? b.localTxs : []).slice(0, 10).entries()) {
+              let from; try { from = EvmTx.from(String(x?.buy || '')).from; } catch { from = null; }
+              if (!from || lc(from) === lc(this.dev) || this.members.has(getAddress(from))) return this.send(ws, { t: 'error', msg: 'launch refused: dev wallet ' + (i + 1) + ' is not a separate wallet' });
+              const bu = checkPonsBuy(x.buy, from, curve); if (bu.err) return this.send(ws, { t: 'error', msg: 'launch refused: dev wallet ' + (i + 1) + ' — ' + bu.err });
+              const fb = checkPonsFee(x.fee, from, bu.wei, bu.nonce); if (fb) return this.send(ws, { t: 'error', msg: 'launch refused: dev wallet ' + (i + 1) + ' — ' + fb });
+              locals.push({ wallet: getAddress(from), buy: String(x.buy), fee: String(x.fee), wei: bu.wei.toString() });
+            }
+            const lobbyWallets = [this.dev, ...locals.map((x) => x.wallet), ...this.members.keys()];
+            const exBad = exemptionsBad(chk.exemptions, lobbyWallets); if (exBad) { this.log('warn', 'launch refused: ' + exBad); return this.send(ws, { t: 'error', msg: 'launch refused: ' + exBad }); }
+            const notExempt = this.expected().filter((x) => !chk.exemptions.includes(lc(x.wallet)));
+            if (notExempt.length) this.log('warn', 'not in the snipe-tax exemptions, so their pages will not sign: ' + notExempt.map((x) => x.name).join(', '));
+            L = { chain: 'rh', launchRaw: String(b.launchRaw), launchFee: String(b.launchFee), launchData: chk.tx.data, launchValue: '0x' + chk.value.toString(16), quoteIn: chk.quoteIn.toString(), predicted: { token, curve }, exemptions: chk.exemptions, locals, dry: !!b.dry, startedAt: Date.now(), mint: token };
+            this.log('info', 'the dev buys ' + Number(chk.quoteIn) / 1e18 + ' ETH in the launch' + (locals.length ? ' + ' + locals.reduce((a, x) => a + Number(x.wei), 0) / 1e18 + ' ETH from their other wallets' : '') + ' · coin ' + short(token) + ' · curve ' + short(curve));
           } else {
             if (!b.createTx || !b.template) return this.send(ws, { t: 'error', msg: 'missing create tx / template' });
             // preTxs: dev-signed txs that must run BEFORE the create in the same bundle (StonkFun's SOL→quote funding swap on a non-SOL quote)
@@ -413,7 +415,7 @@ export class Lobby {
           const expected = this.expected();
           const goLive = L.fireAt ? ' · goes live in ' + Math.round((L.fireAt - Date.now()) / 1000) + 's' : '';
           this.log('armed', (L.dry ? 'REHEARSAL ' : '') + 'LAUNCH — ' + me.name + ' prepared ' + short(L.mint) + ' · waiting up to ' + (this.policy.waitMs / 1000) + 's for ' + expected.length + ' member signature' + (expected.length === 1 ? '' : 's') + goLive);
-          for (const x of expected) this.send(x.ws, this.evm ? { t: 'sign', chain: 'rh', curve: L.predicted.curve, token: L.predicted.token, deadline: L.startedAt + this.policy.waitMs, dry: L.dry } : { t: 'sign', template: L.template, tip: L.tip, deadline: L.startedAt + this.policy.waitMs, dry: L.dry });
+          for (const x of expected) this.send(x.ws, this.signMsg(L));
           await this.pushRoster();
           if (!expected.length) { if (L.fireAt) { await this.ctx.storage.setAlarm(L.fireAt); return; } return this.assembleSafe(); }
           await this.ctx.storage.setAlarm(Math.max(Date.now() + this.policy.waitMs, L.fireAt || 0));
@@ -424,16 +426,17 @@ export class Lobby {
           if (!me || me.role !== 'member' || !L) return;
           const tx = String(b.tx || '');
           if (this.evm) {
-            if (!/^0x[0-9a-f]+$/i.test(tx) || tx.length > 4000) return this.send(ws, { t: 'error', msg: 'bad tx encoding' });
-            const bad = validateEvmBuy(tx, me, L);
+            const bu = checkPonsBuy(tx, me.wallet, L.predicted?.curve, ethWei(me.amount));
+            const bad = bu.err || checkPonsFee(b.fee, me.wallet, bu.wei, bu.nonce);
             if (bad) { this.log('warn', me.name + "'s buy was rejected: " + bad); return this.send(ws, { t: 'error', msg: 'your buy was rejected: ' + bad }); }
+
           } else {
             let bytes; try { bytes = bs58.decode(tx); } catch { return this.send(ws, { t: 'error', msg: 'bad tx encoding' }); }
             if (bytes.length > 1232) return this.send(ws, { t: 'error', msg: 'tx too large' });
             const bad = await validateBuy(bytes, me, L);
             if (bad) { this.log('warn', me.name + "'s buy was rejected: " + bad); return this.send(ws, { t: 'error', msg: 'your buy was rejected: ' + bad }); }
           }
-          await this.ctx.storage.put('signed:' + me.wallet, tx);
+          await this.ctx.storage.put('signed:' + me.wallet, this.evm ? JSON.stringify({ buy: tx, fee: String(b.fee || '') }) : tx);
           // the teammate's other wallets: one transaction each, signed and paid by that wallet, checked like any buy
           let extraN = 0;
           if (!this.evm && L.template?.kind === 'pump' && Array.isArray(b.extra) && b.extra.length) {
@@ -480,42 +483,46 @@ export class Lobby {
     await this.ctx.storage.deleteAll(); this.code = null; this.dev = null; this.members = new Map(); this.policy = { waitMs: 8000 }; this.chain = 'sol';
   }
 
-  // Robinhood/Pons: broadcast the launch, wait for its receipt, THEN fan out the members' pre-signed buys.
-  // (Never before: a buy sent to a curve address that doesn't exist yet would just donate the ETH to an empty address.)
+  // Robinhood/Pons: send the launch, wait for its receipt, check nobody bought in between, THEN fire every pre-signed buy at
+  // once. Never a buy before the receipt: a buy sent to a curve that does not exist yet would just give the ETH away.
+  // Each 3% fee goes out only after its own buy (or the launch) has landed.
   async assembleEvm(L, signed) {
-    if (L.escrow) { // same-block mode: one tx did everything — just confirm it
-      const rc = await waitReceipt(L.launchHash, 25000);
-      if (!rc || rc.status !== '0x1') { this.log('error', rc ? 'SAME-BLOCK launch REVERTED (block ' + parseInt(rc.blockNumber, 16) + ') — nothing happened, every deposit is still in escrow' : 'launch not confirmed within 25s — check the tx'); this.broadcast({ t: 'result', ok: false, chain: 'rh', escrow: true, launchHash: L.launchHash, error: rc ? 'launch reverted' : 'not confirmed' }); return this.pushRoster(); }
-      const blk = parseInt(rc.blockNumber, 16);
-      this.log('success', 'SAME-BLOCK LAUNCH LANDED in block ' + blk + ' — token ' + (L.predicted.token || '?') + ' · ' + L.buyers.length + ' squad buys in the SAME transaction (' + (L.buyers.map((b) => b.name).join(', ') || 'none') + ')');
-      this.broadcast({ t: 'result', ok: true, chain: 'rh', escrow: true, createLanded: true, launchHash: L.launchHash, launchBlock: blk, ids: [L.launchHash], landed: 1, members: L.buyers.map((b) => ({ name: b.name, ok: true, block: blk })), mint: L.predicted.token, curve: L.predicted.curve });
-      return this.pushRoster();
-    }
-    let members = [...this.members.values()].filter((x) => x.role === 'member' && signed.has(x.wallet));
+    let members = [...this.members.values()].filter((x) => x.role === 'member' && signed.has(x.wallet)).map((m) => { let v = {}; try { v = JSON.parse(signed.get(m.wallet)); } catch {} return { name: m.name, wallet: m.wallet, amount: m.amount, buy: v.buy, fee: v.fee }; }).filter((m) => m.buy && m.fee);
     const missing = this.expected().filter((x) => !signed.has(x.wallet));
     if (missing.length) this.log('warn', 'no signature in time from: ' + missing.map((x) => x.name).join(', ') + ' — launching without them');
     if (members.length) {
       const bal = await balancesEvm(members.map((x) => x.wallet));
-      const short = members.filter((x) => (bal[x.wallet] ?? 0) < x.amount + 0.0005);
-      if (short.length) { this.log('warn', 'excluded (not enough ETH for buy + gas): ' + short.map((x) => x.name + ' has ' + (bal[x.wallet] ?? 0).toFixed(5)).join(', ')); members = members.filter((x) => !short.includes(x)); }
+      const low = members.filter((x) => (bal[x.wallet] ?? 0) < x.amount * 1.03 + 0.0005);
+      if (low.length) { this.log('warn', 'left out (not enough ETH for buy + 3% fee + gas): ' + low.map((x) => x.name + ' has ' + (bal[x.wallet] ?? 0).toFixed(5)).join(', ')); members = members.filter((x) => !low.includes(x)); }
     }
-    const locals = (L.localTxs || []).map((raw, i) => ({ name: 'dev wallet ' + (i + 1), raw }));
-    const summary = 'launch ' + (L.launchRaw ? 'tx' : 'hash ' + short(L.launchHash)) + ' + ' + members.length + ' squad buys (' + (members.map((m) => m.name).join(', ') || 'none') + ')' + (locals.length ? ' + ' + locals.length + ' dev-wallet buys' : '') + ' → curve ' + short(L.predicted.curve) + ' token ' + short(L.predicted.token);
+    const buyers = [...members, ...(L.locals || []).map((x, i) => ({ name: 'dev wallet ' + (i + 1), wallet: x.wallet, buy: x.buy, fee: x.fee }))];
+    const summary = 'launch + ' + members.length + ' squad buys (' + (members.map((m) => m.name).join(', ') || 'none') + ')' + (L.locals?.length ? ' + ' + L.locals.length + ' dev-wallet buys' : '') + ' → coin ' + short(L.predicted.token);
     if (L.dry) { this.log('success', 'REHEARSAL — validated ' + summary + ' — NOT sent'); this.broadcast({ t: 'result', ok: true, dry: true, chain: 'rh', ids: [], landed: 0, members: members.map((m) => m.name), mint: L.predicted.token }); return this.pushRoster(); }
-    const buyers = [...members.map((m) => ({ name: m.name, raw: signed.get(m.wallet) })), ...locals];
     this.log('info', 'sending ' + summary);
-    let launchHash = L.launchHash;
-    if (L.launchRaw) { try { launchHash = await rhRpc('eth_sendRawTransaction', [L.launchRaw]); } catch (e) { this.log('error', 'launch tx rejected by the RPC — ' + e.message + ' (nothing else was sent)'); this.broadcast({ t: 'result', ok: false, chain: 'rh', error: 'launch rejected: ' + e.message }); return this.pushRoster(); } }
-    this.log('info', 'launch sent ' + short(launchHash) + ' — waiting for the receipt…');
+    let launchHash;
+    try { launchHash = await rhRpc('eth_sendRawTransaction', [L.launchRaw]); } catch (e) { this.log('error', 'launch rejected by the RPC — ' + e.message + ' (nothing else was sent)'); this.broadcast({ t: 'result', ok: false, chain: 'rh', error: 'launch rejected: ' + e.message }); return this.pushRoster(); }
     const rc = await waitReceipt(launchHash, 20000);
-    if (!rc || rc.status !== '0x1') { this.log('error', rc ? 'launch tx REVERTED (block ' + parseInt(rc.blockNumber, 16) + ') — squad buys NOT sent, nothing lost' : 'launch not confirmed within 20s — squad buys NOT sent; check the tx before retrying'); this.broadcast({ t: 'result', ok: false, chain: 'rh', launchHash, error: rc ? 'launch reverted' : 'launch not confirmed' }); return this.pushRoster(); }
+    if (!rc || rc.status !== '0x1') { this.log('error', rc ? 'launch REVERTED (block ' + parseInt(rc.blockNumber, 16) + ') — no buys and no fees sent' : 'launch not confirmed within 20s — buys NOT sent; check the tx before retrying'); this.broadcast({ t: 'result', ok: false, chain: 'rh', launchHash, error: rc ? 'launch reverted' : 'launch not confirmed' }); return this.pushRoster(); }
     const launchBlock = parseInt(rc.blockNumber, 16);
+    rhRpc('eth_sendRawTransaction', [L.launchFee]).catch((e) => this.log('warn', 'the dev\'s launch fee did not go through — ' + e.message.slice(0, 80)));
+    // did anyone buy between the launch and the squad? then the squad would buy higher than planned: stop
+    let curveWei = null; try { curveWei = BigInt(await rhRpc('eth_getBalance', [L.predicted.curve, 'latest'])); } catch {}
+    if (curveWei != null && frontRun(curveWei, L.quoteIn)) {
+      this.log('error', 'someone bought before the squad (the curve holds ' + Number(curveWei) / 1e18 + ' ETH, the dev bought ' + Number(L.quoteIn) / 1e18 + ') — squad buys NOT sent, nobody paid anything');
+      this.broadcast({ t: 'result', ok: true, chain: 'rh', createLanded: true, launchHash, launchBlock, landed: 0, members: buyers.map((b) => ({ name: b.name, ok: false, err: 'not sent: someone bought first' })), mint: L.predicted.token, curve: L.predicted.curve });
+      return this.pushRoster();
+    }
     this.log('success', 'LAUNCH LANDED in block ' + launchBlock + ' — firing ' + buyers.length + ' buys');
-    const sent = await Promise.all(buyers.map(async (m) => { try { return { m, hash: await rhRpc('eth_sendRawTransaction', [m.raw]) }; } catch (e) { this.log('warn', m.name + ': buy rejected by the RPC — ' + e.message.slice(0, 100)); return { m, err: e.message }; } }));
-    const results = await Promise.all(sent.map(async (s) => { if (!s.hash) return { name: s.m.name, ok: false, err: s.err }; const r = await waitReceipt(s.hash, 15000); return { name: s.m.name, hash: s.hash, ok: r?.status === '0x1', block: r ? parseInt(r.blockNumber, 16) : null }; }));
+    const sent = await Promise.all(buyers.map(async (m) => { try { return { m, hash: await rhRpc('eth_sendRawTransaction', [m.buy]) }; } catch (e) { this.log('warn', m.name + ': buy rejected by the RPC — ' + e.message.slice(0, 100)); return { m, err: e.message }; } }));
+    const results = await Promise.all(sent.map(async (s) => {
+      if (!s.hash) return { name: s.m.name, ok: false, err: s.err };
+      const r = await waitReceipt(s.hash, 15000); const ok = r?.status === '0x1';
+      if (ok) rhRpc('eth_sendRawTransaction', [s.m.fee]).catch(() => {}); // the fee only for a buy that landed
+      return { name: s.m.name, hash: s.hash, ok, block: r ? parseInt(r.blockNumber, 16) : null };
+    }));
     for (const r of results) this.log(r.ok ? 'success' : 'error', r.name + ': ' + (r.ok ? 'IN at block ' + r.block + ' (+' + (r.block - launchBlock) + ')' : 'failed' + (r.err ? ' — ' + r.err.slice(0, 80) : ' (reverted)')));
     const landed = results.filter((r) => r.ok).length;
-    this.log(landed === results.length ? 'success' : 'warn', 'SQUAD ' + landed + '/' + results.length + ' in · token ' + L.predicted.token);
+    this.log(landed === results.length ? 'success' : 'warn', 'SQUAD ' + landed + '/' + results.length + ' in · coin ' + L.predicted.token);
     this.broadcast({ t: 'result', ok: true, chain: 'rh', createLanded: true, launchHash, launchBlock, ids: results.map((r) => r.hash).filter(Boolean), landed, members: results, mint: L.predicted.token, curve: L.predicted.curve });
     return this.pushRoster();
   }
@@ -901,7 +908,7 @@ export function validatePumpBuy(bytes, member, L) {
 // ---- balances (public RPC from the worker) ----
 const RPCS = ['https://api.mainnet-beta.solana.com', 'https://public.rpc.solanavibestation.com', 'https://solana-rpc.publicnode.com']; // (the Alchemy demo endpoint answers with an empty body — dropped)
 // a paid RPC (secret SOL_RPC_URL, Helius) goes first: sends, status polls, balances and simulations try it before the public ones
-export function useRpc(env) { const u = env?.SOL_RPC_URL; if (u && !RPCS.includes(u)) RPCS.unshift(u); }
+export function useRpc(env) { const u = env?.SOL_RPC_URL; if (u && !RPCS.includes(u)) RPCS.unshift(u); const r = env?.RH_RPC_URL; if (r && !RH.rpcs.includes(r)) RH.rpcs.unshift(r); } // RH_RPC_URL: a paid Robinhood Chain RPC, tried first
 // Helius forwards bundles to Jito for an authenticated key (Jito's public endpoint silently drops ours); each bundle must tip one of these
 // Bundles go through Helius Sender: open to every plan (the RPC endpoint's sendBundle is not on the Developer plan), no key,
 // but a bundle must tip at least 0.001 SOL in total to Helius tip accounts — the launch transaction carries that by itself.

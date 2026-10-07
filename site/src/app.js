@@ -6,6 +6,7 @@ import { ed25519 } from '@noble/curves/ed25519.js';
 import bs58 from 'bs58';
 import BN from 'bn.js';
 import { lockIx, LOCK_FEE_SOL, LOCK_FEE_PCT } from './lock.js';
+import * as RHC from './rh.js';
 import { pumpState, buildCreate, buyIxsFor, tokensFor, tokensAt, altKeysOf, signersOf, templateBad, feeSplitIxs, equalShares, TREASURY, LAUNCH_TAX_BPS, HUSHER_TAX_BPS, launchTaxIx } from './pump.js';
 import { husherFee } from '../api/_fees.js';
 import { vaultKey } from './vault.js';
@@ -113,10 +114,12 @@ async function startSession(r, raw) {
   let data = { wallets: [], active: null };
   if (r.vault) { try { data = await openVault(r.vault); } catch { signOut(true); throw new Error(A.kind === 'wallet' ? 'this wallet could not unlock its saved wallets' : 'wrong password'); } }
   V.all = []; V.keys.clear(); V.raw = [];
-  for (const w of data.wallets || []) { try { const kp = Keypair.fromSecretKey(bs58.decode(w.secret)); V.all.push({ id: w.id, name: w.name, address: kp.publicKey.toBase58(), amount: w.amount || 0, on: !!w.on, lock: !!w.lock }); V.keys.set(w.id, kp); } catch { V.raw.push(w); } }
+  RHC.clear();
+  for (const w of data.wallets || []) { if (w.chain === 'rh' && RHC.load(w)) continue; try { const kp = Keypair.fromSecretKey(bs58.decode(w.secret)); V.all.push({ id: w.id, name: w.name, address: kp.publicKey.toBase58(), amount: w.amount || 0, on: !!w.on, lock: !!w.lock }); V.keys.set(w.id, kp); } catch { V.raw.push(w); } }
   if (V.raw.length) log('warn', V.raw.length + ' saved wallet entr' + (V.raw.length === 1 ? 'y' : 'ies') + ' could not be read here — kept in your account untouched');
+  RHC.setActive(data.activeRh);
   V.active.sol = data.active === 'phantom' || V.all.some((w) => w.id === data.active) ? data.active : (V.all[0] || {}).id || null;
-  if (!V.all.length && !V.raw.length) { addWallet('launch wallet', Keypair.generate()); A.dirty = true; setTimeout(flushVault, 0); log('success', 'made your launch wallet ' + V.all[0].address + ' — fund it with “Deposit from Phantom” in 01'); }
+  if (!V.all.length && !V.raw.length && !RHC.RH.list.length) { addWallet('launch wallet', Keypair.generate()); A.dirty = true; setTimeout(flushVault, 0); log('success', 'made your launch wallet ' + V.all[0].address + ' — fund it with “Deposit from Phantom” in 01'); }
   await rememberTab(r.vault || null);
   document.body.classList.remove('out');
   log('success', 'signed in as ' + (A.kind === 'wallet' ? short(A.name) : A.name) + ' · ' + V.all.length + ' saved wallet' + (V.all.length === 1 ? '' : 's'));
@@ -129,7 +132,7 @@ async function flushVault() {
   if (!A.key || !A.dirty) return; if (A.saving) { await A.saving; return flushVault(); }
   A.dirty = false;
   A.saving = (async () => {
-    const data = { wallets: [...V.all.map((w) => ({ id: w.id, name: w.name, secret: bs58.encode(V.keys.get(w.id).secretKey), amount: w.amount || 0, on: !!w.on, lock: !!w.lock })), ...V.raw], active: V.active.sol };
+    const data = { wallets: [...V.all.map((w) => ({ id: w.id, name: w.name, secret: bs58.encode(V.keys.get(w.id).secretKey), amount: w.amount || 0, on: !!w.on, lock: !!w.lock })), ...RHC.dump(), ...V.raw], active: V.active.sol, activeRh: RHC.RH.active };
     const vault = await sealVault(data);
     try { const r = await acct('save', { session: A.session, vault, ver: A.ver }); A.ver = r.ver; try { const s = JSON.parse(sessionStorage.getItem('sq_acct')); s.ver = A.ver; s.vault = vault; sessionStorage.setItem('sq_acct', JSON.stringify(s)); } catch {} }
     catch (e) { A.dirty = true; log('error', 'saving wallets: ' + e.message); if (e.status === 401) { alert('Your session ended — sign in again. Your last change was not saved.'); signOut(true); } else if (e.body?.conflict) alert(e.message); }
@@ -218,7 +221,7 @@ async function reconnect(addr) { W.phantomPk = W.phantomPk || addr; render(); le
 function signOut(quiet) {
   clearTimeout(saveTimer); Object.assign(A, { session: null, id: null, kind: null, name: null, key: null, ver: 0, dirty: false });
   const kid = tabState()?.kid; if (kid) ksDel(kid);
-  V.all = []; V.keys.clear(); V.raw = []; V.sel = null; V.active.sol = null; try { sessionStorage.removeItem('sq_acct'); } catch {} W.phantomPk = null; W.phantom = null;
+  V.all = []; V.keys.clear(); V.raw = []; V.sel = null; V.active.sol = null; RHC.clear(); try { sessionStorage.removeItem('sq_acct'); } catch {} W.phantomPk = null; W.phantom = null;
   if (Y.code) lobbyLeave(true);
   document.body.classList.add('out'); if (!quiet) log('info', 'signed out'); render();
 }
@@ -243,12 +246,15 @@ const LOCK_COST = LOCK_FEE_SOL + 0.009; // Streamflow fee + its account rent, me
 const lockedW = (w) => !!w && (w.id === 'phantom' ? !!PH.lock : !!w.lock);
 const V = { all: [], active: { sol: null }, keys: new Map(), bal: {}, sel: null, raw: [] }; // raw: saved entries this version cannot read, kept as-is so a save never drops them
 const sols = () => V.all;
+// which chain this page launches on: 'sol' (pump.fun) or 'rh' (Pons on Robinhood Chain, see rh.js). A lobby is one or the other.
+const C = { chain: ls.get('sq_chain', 'sol') === 'rh' ? 'rh' : 'sol' };
+const isRh = () => C.chain === 'rh';
 const activeW = () => (V.active.sol === 'phantom' ? phW() : sols().find((w) => w.id === V.active.sol) || null);
 // my first buy: the ★ wallet's amount (the dev buy when I host)
-const mainAmt = () => Number(activeW()?.amount) || 0;
+const mainAmt = () => (isRh() ? RHC.mainAmt() : Number(activeW()?.amount) || 0);
 const keyOf = (w) => (w ? V.keys.get(w.id) || null : null);
-const address = () => (W.mode === 'phantom' ? W.phantomPk : (activeW() || {}).address) || null;
-const unlocked = () => (W.mode === 'phantom' ? !!W.phantomPk : !!keyOf(activeW()));
+const address = () => (isRh() ? RHC.addr() : (W.mode === 'phantom' ? W.phantomPk : (activeW() || {}).address)) || null;
+const unlocked = () => (isRh() ? RHC.unlocked() : W.mode === 'phantom' ? !!W.phantomPk : !!keyOf(activeW()));
 const phantom = () => W.phantom || injected();
 function parseSecret(s) { s = s.trim(); if (s.startsWith('[')) return Keypair.fromSecretKey(Uint8Array.from(JSON.parse(s))); const r = bs58.decode(s); return r.length === 64 ? Keypair.fromSecretKey(r) : Keypair.fromSeed(r); }
 function addWallet(name, kp) {
@@ -300,6 +306,7 @@ async function phantomDeposit(toAddr, sol, also = []) {
 }
 // sign a message (lobby hello / pump.fun login) or a transaction with whichever identity is active
 async function signMessage(bytes) {
+  if (isRh()) return RHC.signText(new TextDecoder().decode(bytes));
   if (W.mode === 'phantom') { const r = await (await ensurePhantom()).signMessage(bytes, 'utf8'); return bs58.encode(r.signature); }
   const k = keyOf(activeW()); if (!k) throw new Error('sign in first');
   return bs58.encode(ed25519.sign(bytes, k.secretKey.slice(0, 32)));
@@ -517,7 +524,7 @@ const MATE_EXTRA_N = 3, MATE_EXTRA_SOL = 10;
 const mateExtras = () => extraWallets().filter((w) => w.amount <= MATE_EXTRA_SOL).slice(0, MATE_EXTRA_N);
 const extraInfo = () => { const ex = mateExtras(); return { n: ex.length, sol: Math.round(ex.reduce((a, w) => a + w.amount, 0) * 1e6) / 1e6 }; };
 // set the ★ wallet's buy (the dev buy, or your first buy as a member) from the launch card — same rule as the wallets table
-function setMainAmt(v){ const n=Number(v); const a=Number.isFinite(n)&&n>0&&n<=100?n:0; if(V.active.sol==='phantom'){ PH.amount=a; savePH(); } else { const w=activeW(); if(w){ w.amount=a; saveV(); } } sendAmount(); render(); }
+function setMainAmt(v){ const n=Number(v); const a=Number.isFinite(n)&&n>0&&n<=100?n:0; if(isRh()){ const w=RHC.activeW(); if(w){ w.amount=a; saveV(); } } else if(V.active.sol==='phantom'){ PH.amount=a; savePH(); } else { const w=activeW(); if(w){ w.amount=a; saveV(); } } sendAmount(); render(); }
 const sendAmount = () => { if (Y.connected && Y.role === 'member') ysend({ t: 'amount', amount: Number(Y.amount) || 0, extra: extraInfo() }); };
 // staying in the lobby: a connection that drops on its own (a sleeping tab, a Wi-Fi blip, the relay restarting) rejoins the
 // same lobby in the same seat, with backoff. The relay gives a returning dev their seat back and re-sends a returning
@@ -611,7 +618,8 @@ async function onLobby(b) {
     case 'sign': {
       if (Y.role !== 'member') return;
       try {
-        if (b.chain === 'rh' || b.template?.kind !== 'pump') throw new Error('this lobby is not a pump.fun launch — update the dev\'s page');
+        if (b.chain === 'rh') { if (!isRh()) throw new Error('this is a Robinhood lobby — switch to Pons'); await RHC.onSign(b, rhCtx()); return; }
+        if (b.template?.kind !== 'pump') throw new Error('this lobby is not a pump.fun launch — update the dev\'s page');
         const amt = Number(Y.amount); if (!(amt > 0 && amt <= 100)) throw new Error('set a buy between 0 and 100 SOL');
         await checkSignRequest(b.template);
         log('info', 'lobby: the dev buys ' + fsol(Number(b.template.devLamports) / 1e9) + ' SOL ahead of the squad');
@@ -697,6 +705,7 @@ function plan(st, wallets, team) {
   return { dev, devMinOut: tokensFor(st, dev).muln(95).divn(100), ws, planned };
 }
 async function launch(dry) {
+  if (isRh()) return RHC.launch(dry, rhCtx());
   if (launching) throw new Error('already launching');
   if (!unlocked()) throw new Error('unlock your wallet first');
   if (!(Y.connected && Y.role === 'dev')) throw new Error('open a lobby first — you launch as its dev');
@@ -846,6 +855,9 @@ async function callout(mint, why) {
 // ---------------- render ----------------
 const el = (tag, cls, txt) => { const e = document.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; };
 const show = (id, on) => $(id).classList.toggle('hide', !on);
+// what rh.js may use from here
+const rhCtx = () => ({ $, el, show, short, log, A, Y, L, saveL, saveV, render, sendAmount, lobbyLeave, ysend, apiHeaders, isRh, logo: () => LOGO, saveLogo: () => ls.set('sq_logo', LOGO),
+  setChain: (v) => { C.chain = v === 'rh' ? 'rh' : 'sol'; ls.set('sq_chain', C.chain); render(); refreshBalances(); } });
 const val = (id, v) => { if (document.activeElement !== $(id)) $(id).value = v ?? ''; };
 function render() {
   const addr = address(); const vault = W.mode === 'launch';
@@ -957,6 +969,7 @@ function render() {
   show('#cLogin', !ok); show('#cLogout', ok); $('#cLogin').disabled = !unlocked();
   val('#cText', P.text); $('#cCnt').textContent = P.text.length + '/500'; const pre = $('#cPre'); pre.textContent = P.armed ? 'Pre-called ✓ · tap to cancel' : 'Pre-call'; pre.classList.toggle('pri', !P.armed); pre.disabled = P.busy || (!P.armed && (!ok || !P.text.trim()));
   $('#cArmed').textContent = P.armed ? 'Armed: your callout posts by itself when the coin from your next launch lands in your ★ wallet.' : !ok ? 'Sign in to pump.fun, write your callout, then pre-call.' : !P.text.trim() ? 'Write your callout, then pre-call.' : 'Ready to pre-call.';
+  RHC.render(rhCtx());
   $('#cLast').textContent = P.last ? 'last: ' + new Date(P.last.at).toLocaleTimeString() + ' · ' + (P.last.ok ? 'callout live · ' + P.last.mint : 'failed — ' + (P.last.err || '').slice(0, 120)) : '';
   tick();
 }
@@ -978,6 +991,7 @@ async function loadShowcase() {
 // ---------------- wire up ----------------
 const fail = (where) => (e) => { log('error', where + ': ' + e.message); alert(e.message); };
 function bind() {
+  RHC.bind(rhCtx());
   // theme: follows the system unless picked; remembered
   const th = ls.get('sq_theme', null); if (th) document.documentElement.dataset.theme = th;
   $('#themeBtn').onclick = () => { const dark = document.documentElement.dataset.theme ? document.documentElement.dataset.theme === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches; const t = dark ? 'light' : 'dark'; document.documentElement.dataset.theme = t; ls.set('sq_theme', t); };
@@ -1040,7 +1054,7 @@ function bind() {
   $('#yName').onchange = () => { Y.name = $('#yName').value.trim().slice(0, 24); ls.set('sq_name', Y.name); if (Y.connected) ysend({ t: 'name', name: Y.name }); };
   $('#yReady').onchange = () => ysend({ t: 'ready', ready: $('#yReady').checked });
   $('#yWait').onchange = () => ysend({ t: 'policy', waitMs: Number($('#yWait').value) * 1000 });
-  $('#yCreate').onclick = async () => { try { await gateToken(); const r = await (await fetch(Y.relay + '/lobby/create', { method: 'POST', headers: { 'x-gate': Y.token, 'content-type': 'application/json' }, body: JSON.stringify({ chain: 'sol' }) })).json(); if (!r.code) throw new Error(r.error || 'relay'); await lobbyConnect(r.code, 'dev'); log('info', 'lobby ' + r.code + ' open — share the code or the invite link'); } catch (e) { report('open lobby: ' + e.message); alert(e.message); } };
+  $('#yCreate').onclick = async () => { try { await gateToken(); const r = await (await fetch(Y.relay + '/lobby/create', { method: 'POST', headers: { 'x-gate': Y.token, 'content-type': 'application/json' }, body: JSON.stringify({ chain: isRh() ? 'rh' : 'sol' }) })).json(); if (!r.code) throw new Error(r.error || 'relay'); await lobbyConnect(r.code, 'dev'); log('info', 'lobby ' + r.code + ' open — share the code or the invite link'); } catch (e) { report('open lobby: ' + e.message); alert(e.message); } };
   $('#yJoin').onclick = () => { const c = $('#yCode').value.trim().toUpperCase(); if (!/^[A-Z2-9]{6}$/.test(c)) return alert('codes are 6 characters'); lobbyConnect(c, 'member').catch((e) => { report('join lobby: ' + e.message); alert(e.message); }); };
   $('#yCode').onkeydown = (e) => { if (e.key === 'Enter') $('#yJoin').click(); };
   $('#yLeave').onclick = () => { if (confirm('Leave the lobby?')) lobbyLeave(false); };
@@ -1066,12 +1080,13 @@ function bind() {
   $('#lLogoBtn').onclick = () => $('#lLogo').click();
   $('#lLogo').onchange = () => { const f = $('#lLogo').files[0]; if (!f) return; if (f.size > 2 * 1024 * 1024) return alert('image must be 2 MB or less'); const rd = new FileReader(); rd.onload = () => { LOGO = { name: f.name, type: f.type, size: f.size, dataUrl: rd.result }; ls.set('sq_logo', LOGO); render(); }; rd.readAsDataURL(f); };
   $('#lRehearse').onclick = () => launch(true).catch(fail('launch'));
-  $('#lFire').onclick = () => { if (confirm('Launch ' + L.symbol.toUpperCase() + ' on pump.fun now?\n\nThis spends real SOL: the dev buy, your ticked wallets\' buys, rent, and every ready teammate\'s buy.')) launch(false).catch(fail('launch')); };
+  $('#lFire').onclick = () => { if (confirm('Launch ' + L.symbol.toUpperCase() + ' on ' + (isRh() ? 'Pons (Robinhood Chain)' : 'pump.fun') + ' now?\n\nThis spends real ' + (isRh() ? 'ETH' : 'SOL') + ': the dev buy, your ticked wallets\' buys, fees, and every ready teammate\'s buy.')) launch(false).catch(fail('launch')); };
   $('#logClear').onclick = () => { $('#log').innerHTML = ''; };
 }
 async function refreshBalances() {
   const ws = sols(); const addrs = [...ws.map((w) => w.address), ...(W.phantomPk ? [W.phantomPk] : [])];
   if (addrs.length) { try { const r = await rpc('getMultipleAccounts', [addrs, { encoding: 'base64', commitment: 'processed', dataSlice: { offset: 0, length: 0 } }]); (r?.value || []).forEach((a, i) => { V.bal[addrs[i]] = a ? a.lamports / LAMPORTS_PER_SOL : 0; }); } catch {} }
+  if (isRh() || RHC.RH.list.length) { await RHC.refresh().catch(() => {}); Object.assign(V.bal, RHC.RH.bal); }
   const a = address(); W.balance = a ? (V.bal[a] ?? null) : null; render();
 }
 

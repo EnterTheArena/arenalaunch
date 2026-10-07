@@ -264,6 +264,8 @@
   .logline{display:grid;grid-template-columns:64px minmax(0,1fr);gap:10px;padding:6px 0;border-bottom:1px solid var(--line)}
   .logline:last-child{border-bottom:0}
   .logline .ts{color:var(--dim)} .logline .m{white-space:pre-wrap;word-break:break-word;color:var(--ink2)}
+  body.rh .solonly{display:none!important} body:not(.rh) .rhonly{display:none!important}
+  .chainseg{margin:0 0 14px}
   .phwarn{background:var(--warnbg);color:var(--warn);border:1px solid rgba(255,181,71,.35);border-radius:12px;padding:10px 12px;font-size:13px;line-height:1.5;margin-top:10px}
   .k-success .m{color:var(--ok)} .k-error .m{color:var(--err)} .k-warn .m{color:var(--warn)} .k-armed .m{color:var(--acc);font-weight:600}
   .foot{display:flex;align-items:center;justify-content:center;gap:10px;flex-wrap:wrap;font-size:12.5px;color:var(--dim);padding:40px 0 44px;text-align:center}
@@ -455,6 +457,18 @@
         </div>
       </div>
     </div>
+    <!-- Robinhood Chain wallets, for Pons launches (kept in the same encrypted account vault) -->
+    <div class="panel hide" id="secRh" style="margin-top:22px">
+      <div class="ph"><h2><span class="ic"><svg class="i"><use href="#i-wallet"/></svg></span>Robinhood Chain wallets</h2><span class="st">for Pons launches · ETH</span></div>
+      <div class="pb" style="padding-bottom:8px">
+        <div class="wtop"><button class="btn pri" id="rhAdd">+ Robinhood wallet</button><input id="rhName" maxlength="24" placeholder="name (optional)" style="max-width:200px" /><button class="btn ghost" id="rhRefresh" title="refresh balances">↻</button></div>
+        <p class="note">Fund a wallet by sending ETH on <b>Robinhood Chain</b> to its address. <b style="color:var(--gold)">★</b> is your main Robinhood wallet: the creator when you host a Pons launch, your buy when you join one. Its key is encrypted in your account like your Solana wallets; back it up with <b>key</b>.</p>
+      </div>
+      <div class="tscroll"><table class="tbl wt"><thead><tr><th style="width:34px">Buys</th><th style="width:26px"></th><th>Wallet</th><th class="r">Balance · ETH</th><th class="r">Buy · ETH</th><th></th></tr></thead><tbody id="rhList"></tbody></table></div>
+      <details class="more" style="margin:0 22px 16px"><summary>Import a Robinhood / EVM wallet</summary>
+        <div class="row"><div class="f"><label>Private key (0x…) — encrypted in your account, never sent anywhere</label><input id="rhKey" type="password" autocomplete="off" placeholder="0x…" /></div><div class="f xs"><button class="btn" id="rhImport">Import</button></div></div>
+      </details>
+    </div>
   </div>
 
   <!-- LAUNCH TAB -->
@@ -466,6 +480,7 @@
           <div class="pb">
             <div id="yOut">
               <div class="row"><div class="f"><label>Your display name</label><input id="yName" maxlength="24" placeholder="how the squad sees you" /></div></div>
+              <div class="row chainseg"><div class="f"><label>Launch on</label><div class="seg" id="yChain"><button data-v="sol">pump.fun · Solana</button><button data-v="rh">Pons · Robinhood Chain</button></div></div></div>
               <div class="choose">
                 <div><h3><svg class="i"><use href="#i-rocket"/></svg>Host a lobby</h3><p>You're the dev: you set up the coin and press launch. Share the code with your squad.</p><button class="btn pri" id="yCreate" style="width:100%;padding:13px">Host a lobby</button></div>
                 <div><h3><svg class="i"><use href="#i-users"/></svg>Join a squad</h3><p>Got a code from your dev? Paste it here and set your buys.</p><div class="row" style="margin:0"><div class="f"><input id="yCode" maxlength="6" placeholder="CODE" style="text-transform:uppercase;letter-spacing:.3em;font-family:var(--mono);font-weight:600" /></div><div class="f xs"><button class="btn" id="yJoin" style="padding:12px 18px">Join</button></div></div></div>
@@ -484,7 +499,7 @@
             <div class="last" id="yLast"></div>
           </div>
         </div>
-        <div class="panel" id="secCallout">
+        <div class="panel solonly" id="secCallout">
           <div class="ph"><h2><span class="ic"><svg class="i"><use href="#i-mega"/></svg></span>pump.fun callout</h2><span class="st" id="cState">not signed in</span></div>
           <div class="pb">
             <p class="note" style="margin:0 0 16px">Write your callout and press <b>Pre-call</b>. When the coin from your next launch lands in your ★ wallet, your callout posts on pump.fun by itself, retrying until pump.fun has the coin. Each person pre-calls their own.</p>
@@ -503,11 +518,13 @@
         <div class="ph"><h2><span class="ic"><svg class="i"><use href="#i-rocket"/></svg></span>Launch</h2><span class="st" id="ctlRole">—</span></div>
         <div class="pb">
           <p class="note" id="lHint" style="margin:0 0 18px"></p>
+          <div class="row chainseg"><div class="f"><div class="seg" id="lChain"><button data-v="sol">pump.fun · Solana</button><button data-v="rh">Pons · Robinhood</button></div></div></div>
           <div class="row"><div class="f"><label>Coin image</label><div class="img"><div class="pv" id="lLogoPrev"></div><div><input type="file" id="lLogo" accept="image/png,image/jpeg,image/webp,image/gif" class="hide" /><button class="btn sm" id="lLogoBtn">Choose image</button><div class="note" id="lLogoInfo"></div></div></div></div></div>
           <div class="row"><div class="f" style="flex:2"><label>Name <span class="c" id="lNameCnt"></span></label><input id="l_name" maxlength="32" placeholder="Coin name" /></div><div class="f"><label>Ticker <span class="c" id="lSymCnt"></span></label><input id="l_symbol" maxlength="13" placeholder="TICKER" style="text-transform:uppercase;font-family:var(--mono);font-weight:600" /></div></div>
-          <div class="row"><div class="f"><label>Your buy · SOL <span class="help" tabindex="0" role="note" aria-label="About your buy" data-tip="The amount your ★ wallet buys at launch — this is the dev buy. It is the same as your ★ wallet's buy in the Wallets tab; change it in either place.">?</span></label><input id="lDevBuy" type="number" step="0.01" min="0" placeholder="0.00" /></div></div>
-          <div class="row"><div class="f"><label>Creator fees</label><div class="seg" id="lFees"><button data-v="me">Dev wallet</button><button data-v="squad">Split with squad</button><button data-v="holders">Holders</button></div></div></div>
-          <p class="note" id="lFeesNote" style="margin:-6px 0 16px"></p>
+          <div class="row"><div class="f"><label>Your buy · <span class="unit">SOL</span> <span class="help" tabindex="0" role="note" aria-label="About your buy" data-tip="The amount your ★ wallet buys at launch — this is the dev buy. It is the same as your ★ wallet's buy in the Wallets tab; change it in either place.">?</span></label><input id="lDevBuy" type="number" step="0.01" min="0" placeholder="0.00" /></div></div>
+          <div class="row rhonly"><div class="f"><label>Creator tax on trades</label><div class="seg" id="lRhTax"><button data-v="0">None</button><button data-v="100">1%</button><button data-v="200">2%</button><button data-v="300">3%</button><button data-v="500">5%</button></div></div></div>
+          <div class="row solonly"><div class="f"><label>Creator fees</label><div class="seg" id="lFees"><button data-v="me">Dev wallet</button><button data-v="squad">Split with squad</button><button data-v="holders">Holders</button></div></div></div>
+          <p class="note solonly" id="lFeesNote" style="margin:-6px 0 16px"></p>
 
           <details class="more" style="margin:0 0 10px"><summary>Description · links (optional)</summary>
             <div class="row"><div class="f"><input id="l_description" maxlength="470" placeholder="Description" /><div class="note" style="margin:6px 0 0">The coin's description ends with “launched on arenalaunch.bond”.</div></div></div>
@@ -515,7 +532,7 @@
             <div class="row"><div class="f"><input id="l_twitter" placeholder="https://x.com/…" /></div></div>
             <div class="row" style="margin-bottom:0"><div class="f"><input id="l_telegram" placeholder="https://t.me/…" /></div></div>
           </details>
-          <details class="more" id="lAdvanced" style="margin:0 0 4px"><summary>Advanced — timing, locks, priority</summary>
+          <details class="more solonly" id="lAdvanced" style="margin:0 0 4px"><summary>Advanced — timing, locks, priority</summary>
             <div class="row"><div class="f"><label>Wallet buys fire</label><div class="seg" id="lFireMode"><button data-v="block0">Block 0 · with the create</button><button data-v="safe">Safe · after it lands</button></div></div></div>
             <p class="note" id="lFireNote" style="margin:-6px 0 14px"></p>
             <div class="row"><div class="f"><label>Lock length <span class="help" tabindex="0" role="note" aria-label="About locks" data-tip="For every wallet with Lock ticked in Wallets (each person chooses their own): its tokens are locked on Streamflow right after its buy lands, until go-live + this time. Nobody can unlock early. Streamflow charges about 0.169 SOL + 0.5% of the tokens per locked wallet.">?</span></label><div class="seg" id="lLock"><button data-v="1">1 hour</button><button data-v="24">24 hours</button><button data-v="168">7 days</button></div></div></div>

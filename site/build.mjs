@@ -10,5 +10,8 @@ await build({
   outfile: join(here, 'public/app.js'), minify: true, sourcemap: false, logLevel: 'warning',
   inject: [join(here, 'src/shim.js')],
   define: { 'process.env.NODE_ENV': '"production"', 'global': 'window' },
+  // src/rh.js shares relay/src/pons.js (the same checks the relay runs); its `ethers` must be this package's copy, not the
+  // relay's, or the bundle carries two
+  plugins: [{ name: 'one-ethers', setup(b) { b.onResolve({ filter: /^ethers$/ }, (a) => (a.importer.includes('/relay/') ? b.resolve('ethers', { resolveDir: here, kind: a.kind }) : undefined)); } }],
 });
 console.log('✔ site/public/app.js');

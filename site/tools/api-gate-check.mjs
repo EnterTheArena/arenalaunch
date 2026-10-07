@@ -8,6 +8,7 @@ globalThis.fetch = async (url, init) => {
   url = String(url); calls.push(url);
   if (url.endsWith('/ratelimit')) return new Response(JSON.stringify({ allowed: true }));
   if (url.endsWith('/session/check')) { const b = JSON.parse(init.body); return new Response(JSON.stringify({ id: await readSession(relayEnv, b.session) })); }
+  if (url.startsWith('https://rpc.mainnet.chain.robinhood.com')) return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: '0x10' }));
   if (url.startsWith('https://helius.test')) return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: 'ok' }));
   if (url.includes('husher.net')) return new Response(JSON.stringify({ success: false, message: 'Minimum amount 0.1 SOL' }), { status: 400 });
   throw new Error('unexpected ' + url);
@@ -31,6 +32,11 @@ for (const m of ['getTransaction', 'getTokenAccountsByOwner', 'getProgramAccount
 r = await run('sol', { method: 'getMultipleAccounts', params: [Array(101).fill('11111111111111111111111111111111')] }, sess); ok(r.status === 400, '/api/sol refuses 101 accounts in one call');
 n = before(); r = await run('husher', { action: 'create', amount: 1, address: 'x'.repeat(40) }); ok(r.status === 401 && before() === n, '/api/husher without a session: 401, Husher never called');
 r = await run('husher', { action: 'estimate' }, sess); ok(r.status === 200, '/api/husher signed in: answered');
+n = calls.length; r = await run('rh', { method: 'eth_chainId', params: [] }); ok(r.status === 401 && calls.length === n, '/api/rh without a session: 401, Robinhood RPC never called');
+r = await run('rh', { method: 'eth_chainId', params: [] }, sess); ok(r.status === 200, '/api/rh signed in: answered');
+r = await run('rh', { method: 'eth_call', params: [{ to: '0x' + '1'.repeat(40), data: '0x' }, 'latest'] }, sess); ok(r.status === 400, '/api/rh refuses eth_call to anything but Pons');
+r = await run('rh', { method: 'eth_call', params: [{ to: '0xe33E9E479dF8802cb0866d5d05258bEc4cF62948', data: '0x' }, 'latest', { ['0x' + '2'.repeat(40)]: { code: '0x00' } }] }, sess); ok(r.status === 400, '/api/rh refuses a code override');
+r = await run('rh', { method: 'eth_getLogs', params: [] }, sess); ok(r.status === 400, '/api/rh refuses eth_getLogs');
 for (const m of ['ipfs', 'pump']) { r = await run(m, { action: 'profile', address: '11111111111111111111111111111111' }); ok(r.status === 401, '/api/' + m + ' without a session: 401'); }
 // the site deployment does not have the relay's secret: falls back to asking the relay
 delete process.env.ACCOUNT_SECRET; process.env.GATE_SECRET = 'something-else';

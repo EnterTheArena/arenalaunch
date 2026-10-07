@@ -61,3 +61,18 @@ node tools/build-sim.mjs group-check && node tools/.group-check.bundle.mjs   # d
 ```
 
 Keys stay in the browser (encrypted). Start with small amounts.
+
+## Robinhood Chain (Pons)
+
+Pick **Pons · Robinhood Chain** in the lobby (or the Launch card) before hosting or joining. Robinhood wallets live in the
+same encrypted account vault (Wallets tab → Robinhood Chain wallets) and are funded with ETH on Robinhood Chain.
+
+Robinhood Chain has no bundles, so a squad launch works like this (`relay/src/pons.js`): the dev pre-signs Pons
+`launchAndBuy` with the squad in `snipeTaxExemptions`; the coin and curve addresses are known before the launch, so each
+teammate pre-signs `curve.buy` plus a 3% fee transfer to the Robinhood treasury as their next transaction. The relay
+re-simulates the launch to learn the curve itself, refuses exemptions outside the lobby, sends the launch, checks nobody
+bought in between (the curve's ETH), then fires every buy at once and each fee only after its buy has landed. Teammates'
+pages re-check the launch call (they are exempt, the curve is the one it creates) before signing.
+
+Optional relay var `RH_RPC_URL` (a paid Robinhood Chain RPC, tried first); the site's `/api/rh` proxy takes the same.
+Check: `node tools/pons-check.mjs` (offline).
