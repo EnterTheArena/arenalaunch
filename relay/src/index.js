@@ -126,6 +126,16 @@ export default {
       if (!env.RL_KEY || !(await safeEq(req.headers.get('x-rl-key') || '', env.RL_KEY))) return json({ error: 'forbidden' }, 403);
       const b = await req.json().catch(() => ({})); return json({ id: await readSession(env, String(b.session || '').slice(0, 512)) });
     }
+    // the signed-in user's profile: their launches and creator fees earned (see profile.js). Each visit can read up to 60
+    // transactions on our RPC, so it is limited per connection and per account.
+    if (req.method === 'POST' && u.pathname === '/profile') {
+      if (!(await gateOk(env, req.headers.get('x-gate') || cookieToken(req)))) return json({ error: 'gate' }, 401);
+      const who = await readSession(env, req.headers.get('x-session') || ''); if (!who) return new Response(JSON.stringify({ error: 'sign in first' }), { status: 401, headers: { 'content-type': 'application/json', ...cors(env, req) } });
+      if ((await overLimit(env, ipOf(req), 'profile', 6)) || (await overLimit(env, who, 'profile-acct', 6))) return new Response(JSON.stringify({ error: 'too many requests — wait a minute' }), { status: 429, headers: { 'content-type': 'application/json', ...cors(env, req) } });
+      const b = await req.json().catch(() => ({}));
+      const r = await env.STATS.get(env.STATS.idFromName('all')).fetch('https://stats/profile', { method: 'POST', body: JSON.stringify({ wallets: Array.isArray(b.wallets) ? b.wallets.slice(0, 30) : [] }) });
+      return new Response(await r.text(), { status: r.status, headers: { 'content-type': 'application/json', ...cors(env, req) } });
+    }
     // accounts: one Durable Object holds them all (see accounts.js)
     const acct = /^\/account\/(nonce|wallet|vault|save|email-start|email-check|email-login)$/.exec(u.pathname);
     if (acct && req.method === 'POST') {
@@ -275,7 +285,19 @@ export class Lobby {
   send(ws, obj) { try { ws.send(JSON.stringify(obj)); } catch {} }
   broadcast(obj) {
     for (const ws of this.ctx.getWebSockets()) this.send(ws, obj);
-    if (obj?.t === 'result') { const landed = !!obj.ok && obj.createLanded !== false && !obj.dry; this.ctx.waitUntil(record(this.env, obj.dry ? 'rehearsal' : 'launch', { landed, mint: obj.mint || null, slot: obj.slot || null, buyers: (obj.members || []).filter((m) => m.ok !== false).length + (landed ? 1 : 0), members: (obj.members || []).length })); }
+    if (obj?.t === 'result') { const landed = !!obj.ok && obj.createLanded !== false && !obj.dry; const wp = landed ? this.launchWallets() : Promise.resolve([]); this.ctx.waitUntil(wp.then((wallets) => record(this.env, obj.dry ? 'rehearsal' : 'launch', { landed, mint: obj.mint || null, dev: this.dev, wallets, slot: obj.slot || null, buyers: (obj.members || []).filter((m) => m.ok !== false).length + (landed ? 1 : 0), members: (obj.members || []).length }))); }
+  }
+  // every wallet that bought in this launch (for each user's profile): the dev, the dev's other wallets, the teammates and
+  // their extra wallets. Read now, before the launch state is cleared (storage reads run before later deletes).
+  async launchWallets() {
+    const out = new Set(this.dev ? [this.dev] : []);
+    try {
+      const L = await this.ctx.storage.get('launch'); for (const raw of L?.localTxs || []) { try { const w = firstSigner(bs58.decode(String(raw))); if (w) out.add(w); } catch {} }
+      for (const x of L?.locals || []) if (x.wallet) out.add(x.wallet);
+      for (const k of (await this.signedMap()).keys()) out.add(k);
+      for (const [, list] of await this.ctx.storage.list({ prefix: 'signedx:' })) for (const x of list || []) if (x.wallet) out.add(x.wallet);
+    } catch {}
+    return [...out].slice(0, 40);
   }
   log(kind, msg) {
     this.broadcast({ t: 'log', kind, msg });

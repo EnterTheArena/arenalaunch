@@ -255,6 +255,13 @@
   .help:hover,.help:focus{color:var(--accink);background:var(--acc);border-color:var(--acc);outline:none}
   .help::after{content:attr(data-tip);position:absolute;bottom:calc(100% + 10px);left:50%;transform:translateX(-50%);width:min(300px,78vw);padding:12px 14px;background:#1b1f2b;border:1px solid var(--line2);border-radius:12px;color:var(--ink);font-family:var(--sans);font-size:12.5px;font-weight:400;line-height:1.55;text-align:left;white-space:normal;opacity:0;visibility:hidden;pointer-events:none;z-index:40;transition:opacity .12s;box-shadow:0 16px 40px -12px rgba(0,0,0,.9)}
   .help:hover::after,.help:focus::after{opacity:1;visibility:visible}
+  .pgrid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:4px 0 18px} @media(max-width:620px){.pgrid{grid-template-columns:1fr}}
+  .pstat{border:1px solid var(--line);border-radius:14px;padding:16px;background:var(--well)} .pstat .k{font-size:12px;color:var(--mute);text-transform:uppercase;letter-spacing:.06em} .pstat b{display:block;font-family:var(--disp);font-size:30px;font-weight:800;margin-top:6px} .pstat .u{font-size:14px;color:var(--mute);margin-left:4px} .pstat .note{margin-top:4px;font-size:12px}
+  #pLaunches.coins{flex-wrap:wrap;overflow:visible;-webkit-mask-image:none;mask-image:none}
+  .help.low{width:auto;height:22px;padding:0 9px;margin-left:6px;border-radius:999px;border-color:rgba(255,181,71,.5);background:var(--warnbg);color:var(--warn);font-family:var(--sans);font-size:11px;font-weight:600}
+  .help.low:hover,.help.low:focus{background:var(--warn);border-color:var(--warn);color:#1a1200}
+  .help.low::after{display:none} /* shown by #tipFloat instead: the wallet tables scroll and would clip it */
+  #tipFloat{position:fixed;z-index:60;max-width:min(320px,86vw);padding:12px 14px;background:#1b1f2b;border:1px solid var(--line2);border-radius:12px;color:var(--ink);font-family:var(--sans);font-size:12.5px;line-height:1.55;box-shadow:0 16px 40px -12px rgba(0,0,0,.9);pointer-events:none}
   .section{border-top:1px solid var(--line);margin-top:18px;padding-top:18px}
   .chk{display:flex;align-items:center;gap:10px;font-size:13.5px;color:var(--ink2);cursor:pointer;margin:0;font-weight:500}
   .last{font-family:var(--mono);font-size:11.5px;color:var(--mute);margin-top:10px;word-break:break-all}
@@ -303,7 +310,7 @@
 
 <div class="top"><div class="in">
   <div class="brand"><i></i><span>arena<b>launch</b></span></div>
-  <nav class="tabs app" id="tabs"><button data-tab="launch" class="on">Launch</button><button data-tab="wallets">Wallets</button></nav>
+  <nav class="tabs app" id="tabs"><button data-tab="launch" class="on">Launch</button><button data-tab="wallets">Wallets</button><button data-tab="profile">Profile</button></nav>
   <div class="sp"></div>
   <div class="chip app"><span class="k">★</span><span id="tWallet"><i class="dot"></i>none</span></div>
   <div class="chip app"><span class="k">Lobby</span><span id="tLobby"><i class="dot"></i>none</span></div>
@@ -387,6 +394,31 @@
     </div>
     <button class="x" id="gStartHide" title="hide">✕</button>
   </section>
+
+  <!-- PROFILE TAB -->
+  <div id="tabProfile" class="hide">
+    <div class="panel">
+      <div class="ph"><h2><span class="ic"><svg class="i"><use href="#i-users"/></svg></span><span id="pName">—</span></h2><span class="st" id="pSub"></span><button class="btn ghost sm" id="pRefresh" style="margin-left:auto">↻ refresh</button></div>
+      <div class="pb">
+        <div class="pgrid">
+          <div class="pstat"><span class="k">Creator fees earned</span><b><span id="pEarned">—</span><span class="u">SOL</span></b><div class="note" id="pEarnedNote"></div></div>
+          <div class="pstat"><span class="k">Ready to claim</span><b><span id="pUnclaimed">—</span><span class="u">SOL</span></b><div class="note">pump.fun creator fees waiting in your wallets' vaults</div></div>
+        </div>
+        <div class="tscroll"><table class="tbl"><thead><tr><th>Wallet</th><th class="r">Ready to claim</th><th class="r">Earned so far</th><th></th></tr></thead><tbody id="pWallets"></tbody></table></div>
+        <p class="note">One claim collects everything a wallet's coins have earned on pump.fun so far, straight into that wallet. Coins whose fees go to holders are paid out by pump.fun, not here.</p>
+        <div id="pSplitBox" class="hide" style="margin-top:18px">
+          <h3 style="margin:0 0 8px;font-size:15px">Squad-split coins</h3>
+          <p class="note" style="margin-top:0">These coins split their creator fees between the squad. The fees wait in the coin's sharing account until someone pays them out to everyone; any shareholder can, for just the network fee.</p>
+          <div class="tscroll"><table class="tbl"><tbody id="pSplits"></tbody></table></div>
+        </div>
+        <div class="note err" id="pErr"></div>
+      </div>
+    </div>
+    <div class="panel" style="margin-top:22px">
+      <div class="ph"><h2><span class="ic"><svg class="i"><use href="#i-rocket"/></svg></span>My launches</h2></div>
+      <div class="pb"><div class="coins" id="pLaunches"></div></div>
+    </div>
+  </div>
 
   <!-- WALLETS TAB -->
   <div id="tabWallets" class="hide">
@@ -543,6 +575,7 @@
   </div>
   <div class="foot app"><span>arenalaunch</span><i></i><span>keys never leave your browser</span><i></i><span>start with small amounts</span></div>
 </main>
+<div id="tipFloat" class="hide" role="tooltip"></div>
 <script src="/app.js"></script>
 <script src="/start.js"></script>
 </body>

@@ -61,3 +61,11 @@ node tools/build-sim.mjs group-check && node tools/.group-check.bundle.mjs   # d
 ```
 
 Keys stay in the browser (encrypted). Start with small amounts.
+
+## Profile
+
+The **Profile** tab shows a signed-in user's launches (as the dev or a buyer), the pump.fun creator fees they have earned
+and what is ready to claim, with a **Claim** per wallet (pump.fun's own `collect_creator_fee`, built with their SDK) and
+**Distribute** for squad-split coins (pays every shareholder). The relay lists launches per wallet as they land and adds
+up fee payouts from each wallet's history (`relay/src/profile.js`, `POST /profile`, signed-in only, 6/min).
+Check: `node tools/profile-check.mjs` (offline).

@@ -1,10 +1,13 @@
 // ============================================================================
 // arenalaunch STATS — one Durable Object counting usage per UTC day. No IPs, no wallets in the counters:
 // visitors are a random id the page keeps in localStorage. Launch rows keep the mint (it is public on chain).
+// For profiles, each landed launch is also listed under the wallets that bought in it (public on chain too), and each
+// wallet's creator-fee history scan is kept here (see profile.js).
 //
 //   record(env, type, extra)       — from the worker / other DOs: visit | signin | lobby | join | rehearsal | launch
 //   GET /stats/summary            — the dashboard (signed-in session of the ADMIN_WALLET only)
 // ============================================================================
+import { scanStep } from './profile.js';
 const day = (t = Date.now()) => new Date(t).toISOString().slice(0, 10);
 const FIELDS = ['visits', 'uniques', 'signins', 'newAccounts', 'lobbies', 'joins', 'rehearsals', 'launches', 'landed', 'buyers', 'errors'];
 
@@ -55,6 +58,11 @@ export class Stats {
           recent.unshift({ t: Date.now(), mint: b.mint || null, landed: !!b.landed, buyers: Number(b.buyers) || 0, members: Number(b.members) || 0, slot: b.slot || null });
           await S.put('recent', recent.slice(0, 50));
           // the public showcase keeps every landed coin (mint + time only)
+          if (b.landed && b.mint && Array.isArray(b.wallets)) for (const w of b.wallets.slice(0, 40).map(String)) {
+            if (!/^([1-9A-HJ-NP-Za-km-z]{32,44}|0x[0-9a-fA-F]{40})$/.test(w)) continue;
+            const k = 'wl:' + w; const l = ((await S.get(k)) || []).filter((x) => x.mint !== b.mint);
+            l.unshift({ t: Date.now(), mint: String(b.mint), role: w === b.dev ? 'dev' : 'buyer' }); await S.put(k, l.slice(0, 200));
+          }
           if (b.landed && b.mint) { const shown = await landedList(S); if (!shown.some((x) => x.mint === b.mint)) { shown.unshift({ t: Date.now(), mint: String(b.mint) }); await S.put('landed', shown.slice(0, 500)); } }
           break;
         }
@@ -80,6 +88,26 @@ export class Stats {
         out.push({ mint: x.mint, t: x.t, name: starred(m?.name), symbol: starred(m?.symbol), image: m?.image || null });
       }
       return Response.json({ launches: out });
+    }
+    if (op === 'profile') {
+      // {wallets: [...]} (the signed-in user's own wallets, checked by the worker) → launches + creator fees earned
+      const b = await req.json().catch(() => ({})); const ws = (Array.isArray(b.wallets) ? b.wallets : []).map(String).filter((w) => /^([1-9A-HJ-NP-Za-km-z]{32,44}|0x[0-9a-fA-F]{40})$/.test(w)).slice(0, 30);
+      const byMint = new Map();
+      for (const w of ws) for (const x of (await S.get('wl:' + w)) || []) { const o = byMint.get(x.mint); if (!o || (x.role === 'dev' && o.role !== 'dev')) byMint.set(x.mint, { ...x, wallet: w }); }
+      let fetched = 0; const launches = [];
+      for (const x of [...byMint.values()].sort((a, c) => c.t - a.t).slice(0, 100)) {
+        let m = await S.get('meta2:' + x.mint);
+        if (!m && fetched < 6 && !x.mint.startsWith('0x')) { fetched++; const f = await coinMeta(x.mint); if (f) { m = { ...f, at: Date.now() }; await S.put('meta2:' + x.mint, m); } }
+        launches.push({ mint: x.mint, t: x.t, role: x.role, wallet: x.wallet, name: starred(m?.name), symbol: starred(m?.symbol), image: m?.image || null });
+      }
+      // creator fees earned, Solana wallets only; at most 60 transactions read per visit across all wallets
+      const fees = {}; let budget = 60;
+      for (const w of ws.filter((x) => !x.startsWith('0x'))) {
+        let st = await S.get('fs:' + w);
+        if (budget > 0) { try { const r = await scanStep(rpc, w, st, Math.min(budget, 30)); budget -= r.used; st = r.state; await S.put('fs:' + w, st); } catch {} }
+        fees[w] = { earned: st?.earned || 0, done: !!st?.done, scanned: st?.n || 0 };
+      }
+      return Response.json({ launches, fees });
     }
     if (op === 'errclear') { await S.put('errors', []); return Response.json({ ok: true }); } // owner: problems list handled
     if (op === 'hide') { // owner: take a coin off (or back onto) the public list — {mint, hide}
@@ -126,6 +154,11 @@ async function landedList(S) {
   return l;
 }
 const RPCS = ['https://api.mainnet-beta.solana.com', 'https://solana-rpc.publicnode.com', 'https://public.rpc.solanavibestation.com'];
+// a JSON-RPC call through the first endpoint that answers (the paid one first when SOL_RPC_URL is set)
+async function rpc(method, params) {
+  let last; for (const url of RPCS) { try { const r = await fetchT(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) }, 8000); const j = await r.json(); if (j.error) { last = new Error(j.error.message || 'rpc'); continue; } return j.result; } catch (e) { last = e; } }
+  throw last || new Error('rpc');
+}
 const fetchT = (url, init, ms) => { const c = new AbortController(); const t = setTimeout(() => c.abort(), ms); return fetch(url, { ...init, signal: c.signal }).finally(() => clearTimeout(t)); };
 // IPFS links go through pump.fun's own gateway (ipfs.io now answers gateway requests with 429)
 const IPFS = 'https://pump.mypinata.cloud/ipfs/';

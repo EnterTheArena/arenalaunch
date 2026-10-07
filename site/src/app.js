@@ -6,6 +6,7 @@ import { ed25519 } from '@noble/curves/ed25519.js';
 import bs58 from 'bs58';
 import BN from 'bn.js';
 import { lockIx, LOCK_FEE_SOL, LOCK_FEE_PCT } from './lock.js';
+import * as PF from './profile.js';
 import { pumpState, buildCreate, buyIxsFor, tokensFor, tokensAt, altKeysOf, signersOf, templateBad, feeSplitIxs, equalShares, TREASURY, LAUNCH_TAX_BPS, HUSHER_TAX_BPS, launchTaxIx } from './pump.js';
 import { husherFee } from '../api/_fees.js';
 import { vaultKey } from './vault.js';
@@ -218,6 +219,7 @@ async function reconnect(addr) { W.phantomPk = W.phantomPk || addr; render(); le
 function signOut(quiet) {
   clearTimeout(saveTimer); Object.assign(A, { session: null, id: null, kind: null, name: null, key: null, ver: 0, dirty: false });
   const kid = tabState()?.kid; if (kid) ksDel(kid);
+  PF.reset(); if (!$('#tabProfile').classList.contains('hide')) document.querySelector('#tabs button[data-tab=launch]')?.click();
   V.all = []; V.keys.clear(); V.raw = []; V.sel = null; V.active.sol = null; try { sessionStorage.removeItem('sq_acct'); } catch {} W.phantomPk = null; W.phantom = null;
   if (Y.code) lobbyLeave(true);
   document.body.classList.add('out'); if (!quiet) log('info', 'signed out'); render();
@@ -686,6 +688,22 @@ async function makeAlt(keys) {
 // teammates the launch counts on: online, ready, a buy of (0, 100] SOL, and a balance that covers it with fees
 const TAXED = 1 + LAUNCH_TAX_BPS / 10000; // a buy of N SOL costs N × 1.03 with the launch fee
 const memberNeed = (m) => m.amount * TAXED + Math.min(MEMBER_PRIO_MAX, Number(L.prio) || 0) + 0.0045;
+// what a ticked wallet must hold for its part of a launch (same numbers the launch checks use): the ★ wallet as the dev
+// also pays the lookup table, its token account and the create's fees; as a teammate, or any other wallet, its buy + 3% + fees
+const needOf = (w, star) => {
+  const amt = star ? mainAmt() : Number(w.amount) || 0; if (!(amt > 0)) return 0; const lock = lockedW(w) ? LOCK_COST : 0;
+  if (star && Y.role !== 'member') return amt * TAXED + 0.012 + 2 * Math.min(0.05, Number(L.prio) || 0) + (L.fees === 'squad' ? 0.007 : 0) + lock;
+  if (star) return amt * TAXED + Math.min(MEMBER_PRIO_MAX, Number(L.prio) || 0) + 0.0045 + lock;
+  return amt * TAXED + 0.004 + Math.min(0.05, Number(L.prio) || 0) + lock;
+};
+// a ⚠ next to a wallet that is ticked to buy but cannot pay for it (hover or tap for the numbers)
+function lowBadge(w, star) {
+  const need = needOf(w, star), has = w.address ? V.bal[w.address] : null;
+  if (!(need > 0) || has == null || has >= need) return null;
+  const more = Math.ceil((need - has) * 1e4) / 1e4;
+  const tip = 'You picked ' + w.name + ' to buy ' + fsol(star ? mainAmt() : w.amount) + ' SOL' + (star && Y.role !== 'member' ? ' as the dev' : '') + ', but it only has ' + fsol(has) + ' SOL. It needs about ' + fsol(Math.ceil(need * 1e4) / 1e4) + ' SOL (the buy + 3% launch fee' + (star && Y.role !== 'member' ? ' + ~0.012 for the lookup table, token account and fees' : ' + network fees') + (lockedW(w) ? ' + the Streamflow lock' : '') + '). Send at least ' + fsol(more) + ' more SOL, or lower its buy.';
+  const b = el('span', 'help low', '⚠ low SOL'); b.tabIndex = 0; b.setAttribute('role', 'note'); b.dataset.tip = tip; b.setAttribute('aria-label', tip); return b;
+}
 const teamSolOf = (m) => m.amount + (m.extra?.sol || 0); const teamNOf = (m) => 1 + (m.extra?.n || 0);
 const teamReady = () => (Y.roster?.members || []).filter((m) => m.role === 'member' && m.online && m.ready && m.amount > 0 && m.amount <= 100);
 const teamFunded = () => teamReady().filter((m) => m.balance != null && m.balance >= memberNeed(m));
@@ -846,6 +864,8 @@ async function callout(mint, why) {
 // ---------------- render ----------------
 const el = (tag, cls, txt) => { const e = document.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; };
 const show = (id, on) => $(id).classList.toggle('hide', !on);
+// what profile.js may use from here
+const pfCtx = () => ({ $, el, show, short, log, A, Y, render, gateToken, getAccounts, blockhash, signAs, sendAndConfirm, sols, phantomPk: () => W.phantomPk });
 const val = (id, v) => { if (document.activeElement !== $(id)) $(id).value = v ?? ''; };
 function render() {
   const addr = address(); const vault = W.mode === 'launch';
@@ -869,6 +889,7 @@ function render() {
     st.onclick = () => { if (star) return; if (Y.code) { if (!confirm('Your ★ wallet is who you are in lobby ' + Y.code + '. Switching leaves the lobby — continue?')) return; lobbyLeave(false); } V.active.sol = w.id; saveV(); render(); refreshBalances(); };
     const name = el('td'); const nm = el('span', 'nm', w.name); name.append(nm); if (isPh) name.append(el('span', 'tag phm', 'sign-in wallet · signs in Phantom')); if (star) name.append(el('span', 'tag ok', 'main'));
     if (!isPh && !V.keys.has(w.id)) name.append(el('span', 'tag', 'locked'));
+    if (star || w.on) { const lb = lowBadge(w, star); if (lb) name.append(lb); }
     const ad = el('div', 'addr', w.address ? short(w.address) : 'not connected'); if (w.address) { ad.title = w.address; const cp = el('button', null, 'copy'); cp.onclick = () => navigator.clipboard?.writeText(w.address).then(() => { cp.textContent = 'copied ✓'; setTimeout(() => (cp.textContent = 'copy'), 1200); }); ad.append(cp); } name.append(ad);
     const amtTd = el('td', 'r'); const amt = el('input', 'buy'); amt.type = 'number'; amt.step = '0.01'; amt.min = '0'; amt.placeholder = '0.00'; amt.value = w.amount || ''; amt.disabled = !(star || w.on) || !can;
     amt.onchange = () => { const n = Number(amt.value); const v = Number.isFinite(n) && n > 0 && n <= 100 ? n : 0; if (n > 100) alert('a buy is at most 100 SOL'); if (isPh) { PH.amount = v; savePH(); } else { w.amount = v; saveV(); } sendAmount(); render(); }; amtTd.append(amt);
@@ -891,7 +912,7 @@ function render() {
   // my wallets in the launch
   const lb = $('#lWallets'); lb.innerHTML = ''; const mineList = [...(activeW() ? [{ ...activeW(), amount: mainAmt(), main: true }] : []), ...extraWallets()];
   if (!mineList.length || !(mainAmt() > 0 || extraWallets().length)) { const tr = el('tr'); const td = el('td', 'empty', 'No buys set — pick your wallets and amounts in the Wallets tab.'); td.colSpan = 3; tr.append(td); lb.append(tr); }
-  else for (const w of mineList) { const tr = el('tr'); const n = el('td'); n.append(document.createTextNode((w.main ? '★ ' : '') + w.name), el('span', 'tag', short(w.address))); if (lockedW(w)) n.append(el('span', 'tag ok', 'locks')); tr.append(n, el('td', 'r m', w.address && V.bal[w.address] != null ? fsol(V.bal[w.address]) + ' held' : ''), el('td', 'r m', fsol(w.amount) + ' SOL')); lb.append(tr); }
+  else for (const w of mineList) { const tr = el('tr'); const n = el('td'); n.append(document.createTextNode((w.main ? '★ ' : '') + w.name), el('span', 'tag', short(w.address))); if (lockedW(w)) n.append(el('span', 'tag ok', 'locks')); { const lb = lowBadge(w, !!w.main); if (lb) n.append(lb); } tr.append(n, el('td', 'r m', w.address && V.bal[w.address] != null ? fsol(V.bal[w.address]) + ' held' : ''), el('td', 'r m', fsol(w.amount) + ' SOL')); lb.append(tr); }
   // lobby
   const inL = !!Y.code; show('#yOut', !inL); show('#yIn', inL);
   val('#yName', Y.name);
@@ -957,6 +978,7 @@ function render() {
   show('#cLogin', !ok); show('#cLogout', ok); $('#cLogin').disabled = !unlocked();
   val('#cText', P.text); $('#cCnt').textContent = P.text.length + '/500'; const pre = $('#cPre'); pre.textContent = P.armed ? 'Pre-called ✓ · tap to cancel' : 'Pre-call'; pre.classList.toggle('pri', !P.armed); pre.disabled = P.busy || (!P.armed && (!ok || !P.text.trim()));
   $('#cArmed').textContent = P.armed ? 'Armed: your callout posts by itself when the coin from your next launch lands in your ★ wallet.' : !ok ? 'Sign in to pump.fun, write your callout, then pre-call.' : !P.text.trim() ? 'Write your callout, then pre-call.' : 'Ready to pre-call.';
+  PF.render(pfCtx());
   $('#cLast').textContent = P.last ? 'last: ' + new Date(P.last.at).toLocaleTimeString() + ' · ' + (P.last.ok ? 'callout live · ' + P.last.mint : 'failed — ' + (P.last.err || '').slice(0, 120)) : '';
   tick();
 }
@@ -978,6 +1000,11 @@ async function loadShowcase() {
 // ---------------- wire up ----------------
 const fail = (where) => (e) => { log('error', where + ': ' + e.message); alert(e.message); };
 function bind() {
+  // the low-SOL warnings' tooltip floats over the page (hover, or tap/focus on mobile)
+  { const tip = $('#tipFloat'); const on = (e) => { const b = e.target.closest?.('.help.low'); if (!b) return; tip.textContent = b.dataset.tip; tip.classList.remove('hide'); const r = b.getBoundingClientRect(), w = tip.offsetWidth, h = tip.offsetHeight; tip.style.left = Math.max(8, Math.min(innerWidth - w - 8, r.left)) + 'px'; tip.style.top = (r.bottom + 8 + h > innerHeight ? r.top - h - 8 : r.bottom + 8) + 'px'; };
+    const off = (e) => { if (e.target.closest?.('.help.low')) tip.classList.add('hide'); };
+    document.addEventListener('mouseover', on); document.addEventListener('focusin', on); document.addEventListener('mouseout', off); document.addEventListener('focusout', off); addEventListener('scroll', () => tip.classList.add('hide'), true); }
+  PF.bind(pfCtx());
   // theme: follows the system unless picked; remembered
   const th = ls.get('sq_theme', null); if (th) document.documentElement.dataset.theme = th;
   $('#themeBtn').onclick = () => { const dark = document.documentElement.dataset.theme ? document.documentElement.dataset.theme === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches; const t = dark ? 'light' : 'dark'; document.documentElement.dataset.theme = t; ls.set('sq_theme', t); };
@@ -1009,8 +1036,8 @@ function bind() {
   $('#vmRemove').onclick = () => { const w = selW(); if (!w) return; if (confirm('Remove ' + w.name + ' from your account? Withdraw or copy its private key FIRST — this cannot be undone.')) { vaultRemove(w); $('#vmOut').textContent = ''; render(); } };
   $('#wRefresh').onclick = refreshBalances;
   // tabs: Launch | Wallets (remembered)
-  const tab = (t) => { document.querySelectorAll('#tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === t)); show('#tabWallets', t === 'wallets'); show('#tabLaunch', t === 'launch'); ls.set('sq_tab', t); if (t === 'wallets') refreshBalances(); };
-  document.querySelectorAll('#tabs button').forEach((b) => (b.onclick = () => tab(b.dataset.tab))); tab(ls.get('sq_tab', 'launch') === 'wallets' ? 'wallets' : 'launch');
+  const tab = (t) => { document.querySelectorAll('#tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === t)); show('#tabWallets', t === 'wallets'); show('#tabLaunch', t === 'launch'); show('#tabProfile', t === 'profile'); ls.set('sq_tab', t); if (t === 'wallets') refreshBalances(); if (t === 'profile' && !PF.loaded()) PF.load(pfCtx()); };
+  document.querySelectorAll('#tabs button').forEach((b) => (b.onclick = () => tab(b.dataset.tab))); tab(['wallets', 'profile'].includes(ls.get('sq_tab', 'launch')) && A.key ? ls.get('sq_tab', 'launch') : 'launch');
   $('#goWallets').onclick = (e) => { e.preventDefault(); tab('wallets'); };
   // the import field is only put on the page when someone asks to import (keeps key fields out of the page until then)
   const showImport = () => { if (!$('#vImportKey')) { const row = el('div', 'row'); const f = el('div', 'f'); f.append(el('label', null, 'Import a wallet you already have — its key is encrypted in this browser and never leaves it')); const inp = el('input'); inp.id = 'vImportKey'; inp.type = 'password'; inp.autocomplete = 'off'; inp.placeholder = 'base58 or [1,2,…]'; f.append(inp); const g = el('div', 'f xs'); const b = el('button', 'btn', 'Import'); b.id = 'vImport'; g.append(b); row.append(f, g); $('#vImportRow').append(row);
