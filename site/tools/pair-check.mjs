@@ -60,6 +60,17 @@ r = checkPumpLaunch(devTx([...built.ixs, launchTaxIx(dev.publicKey, devL), Syste
 r = checkPumpLaunch(good, { ...t, quote: { ...t.quote, hop1: { ...t.quote.hop1, quoteMint: X.toBase58() } } }, dev.publicKey.toBase58()); ok(r.err, 'a template whose first hop is not SOL → $X: refused', r.err);
 r = checkPumpLaunch(good, { ...t, mintB: WSOL }, dev.publicKey.toBase58()); ok(r.err, 'a template naming two pairs: refused', r.err);
 
+// ---- holder rewards on a paired coin: pump.fun takes is_holder_reward with any quote (holders are paid in $X) ----
+{
+  const hb = await buildPairedCreate(st, pair, { mint: mintKp.publicKey, creator: dev.publicKey, name: 'Paired', symbol: 'PAIR', uri: 'https://x/y.json', holderReward: true, devLamports: devL, devMinOut: devMin });
+  const hc = hb.ixs.find((ix) => ix.programId.equals(PUMP_PROGRAM_ID)); const ht = { ...hb.template, blockhash: t.blockhash };
+  const hall = [...hb.ixs]; const halt = new AddressLookupTableAccount({ key: rk(), state: { deactivationSlot: 2n ** 64n - 1n, lastExtendedSlot: 0, lastExtendedSlotStartIndex: 0, addresses: altKeysOf(hall, signersOf(hall)).map((k) => new PublicKey(k)) } });
+  const v = new VersionedTransaction(new TransactionMessage({ payerKey: dev.publicKey, recentBlockhash: t.blockhash, instructions: [ComputeBudgetProgram.setComputeUnitLimit({ units: 1000000 }), ...hb.ixs, launchTaxIx(dev.publicKey, devL)] }).compileToV0Message([halt])); v.sign([dev, mintKp]);
+  const raw = bs58.encode(v.serialize());
+  ok(ht.holderReward === true && hc.data.length > create.data.length - 1, 'a holder-rewards paired create builds (holderReward set on create_v2)');
+  ok(checkPumpLaunch(raw, ht, dev.publicKey.toBase58()).devLamports === devL, 'the relay accepts a holder-rewards paired create (' + bs58.decode(raw).length + ' bytes)', JSON.stringify(checkPumpLaunch(raw, ht, dev.publicKey.toBase58())));
+  ok((await pairedTemplateBad(getAccounts, st, ht, dev.publicKey.toBase58())) === null, 'a teammate\'s page accepts a holder-rewards paired template');
+}
 // ---- a teammate's buy (legacy transaction, as the page signs it) ----
 const mate = Keypair.generate(); const L = { template: t, dry: false };
 const mateTx = async (ixs, amt = 2e8) => { const tx = new Transaction({ feePayer: mate.publicKey, recentBlockhash: t.blockhash }); tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 450000 }), ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 2000 }), ...ixs); tx.sign(mate); return tx.serialize(); };

@@ -754,7 +754,7 @@ async function launch(dry) {
     if (L.fees === 'holders' && !st.global.isHolderRewardEnabled) throw new Error('pump.fun has holder-reward coins switched off right now — pick "me"');
     // paired with another pump.fun coin: read it fresh (its price moves) — every buy goes SOL → $X → the coin
     const pair = (L.pair || '').trim() ? await pairOf(L.pair.trim()) : null;
-    if (pair && L.fees !== 'me') throw new Error('a paired coin keeps its creator fees with the dev wallet for now — pick "Dev wallet" under Creator fees');
+    if (pair && L.fees === 'squad') throw new Error('a paired coin cannot split its creator fees with the squad yet — pick "Dev wallet" or "Holders" under Creator fees');
     if (pair) log('info', 'launch: paired with ' + pairLabel(pair) + ' (' + pair.mint + ') via its ' + (pair.hop1.venue === 'pool' ? 'PumpSwap pool' : 'bonding curve') + ' — every buy pays SOL, swaps through ' + pairLabel(pair) + ' into the coin');
     const team = teamFunded();
     const p = plan(st, extraWallets(), team, pair);
@@ -970,7 +970,8 @@ function render() {
   $('#lNameCnt').textContent = L.name.length + '/32'; $('#lSymCnt').textContent = L.symbol.length + '/13';
   document.querySelectorAll('#lFees button').forEach((b) => b.classList.toggle('on', b.dataset.v === L.fees));
   $('#lFeesNote').textContent = L.fees === 'holders' ? 'Holder-rewards coin: the creator fee on every trade is paid out to holders by pump.fun. Permanent.' : L.fees === 'squad' ? 'The creator fee on every trade is split equally between you and every teammate in the lobby (max 10 people), set on pump.fun right after the block-0 buys and locked for good. Costs ~0.006 SOL.' : 'Regular coin: the creator fee on every trade goes to your ★ wallet (claim it on pump.fun).';
-  if ((L.pair || '').trim() && L.fees !== 'me') $('#lFeesNote').textContent = '⚠ A paired coin keeps its creator fees with the dev wallet for now — pick "Dev wallet" to launch it.';
+  if ((L.pair || '').trim() && L.fees === 'squad') $('#lFeesNote').textContent = '⚠ A paired coin cannot split its creator fees with the squad yet — pick "Dev wallet" or "Holders" to launch it.';
+  else if ((L.pair || '').trim() && L.fees === 'holders') $('#lFeesNote').textContent = 'Holder-rewards coin: the creator fee on every trade is paid out to holders by pump.fun — in the pair coin, since that is what this coin trades against. Permanent.';
   val('#lCountdown', L.countdown); val('#lPrio', L.prio); if(document.activeElement!==$('#lDevBuy')) $('#lDevBuy').value = mainAmt() || '';
   document.querySelectorAll('#lFireMode button').forEach((b) => b.classList.toggle('on', b.dataset.v === (L.fire === 'safe' ? 'safe' : 'block0')));
   document.querySelectorAll('#lLock button').forEach((b) => b.classList.toggle('on', Number(b.dataset.v) === (Number(L.lockHours) || 24)));
