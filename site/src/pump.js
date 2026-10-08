@@ -5,7 +5,9 @@
 // buy_v2, so the SDK builds buy_v2 and we swap the instruction data.
 import { PublicKey, TransactionInstruction, SystemProgram, Keypair } from '@solana/web3.js';
 import BN from 'bn.js';
-import { PUMP_SDK, GLOBAL_PDA, PUMP_FEE_CONFIG_PDA, PUMP_PROGRAM_ID, getBuyTokenAmountFromSolAmount, userVolumeAccumulatorPda } from '@pump-fun/pump-sdk';
+import { unpackMint, getExtensionData, ExtensionType } from '@solana/spl-token';
+import { unpack as unpackMeta } from '@solana/spl-token-metadata';
+import { PUMP_SDK, OnlinePumpSdk, GLOBAL_PDA, PUMP_FEE_CONFIG_PDA, PUMP_PROGRAM_ID, PUMP_AMM_PROGRAM_ID, getBuyTokenAmountFromSolAmount, userVolumeAccumulatorPda } from '@pump-fun/pump-sdk';
 
 export const PUMP = PUMP_PROGRAM_ID.toBase58();
 export const WSOL = 'So11111111111111111111111111111111111111112';
@@ -117,3 +119,98 @@ export async function feeSplitIxs(mint, creator, holders) {
 }
 // equal shares in basis points; the remainder goes to the first (the dev)
 export const equalShares = (addrs) => { const b = Math.floor(10000 / addrs.length); return addrs.map((a, i) => ({ address: a, bps: i ? b : 10000 - b * (addrs.length - 1) })); };
+
+// ---------------- paired launches: a coin quoted in another pump.fun coin ($X) instead of SOL ----------------
+// Everyone still pays in SOL: each buy is ONE pump-amm multi_hop_swap, SOL → $X (on $X's own curve or pool) → the new coin
+// (on its fresh curve, quoted in $X), exact-in. The new coin does not exist when the buys are signed, so the second hop is
+// built by hand from its mint; the first is read from chain. The 3% launch fee stays in SOL, on the SOL that goes in.
+export const MULTI_HOP = [43, 100, 73, 19, 233, 246, 111, 148];
+export const AMM = PUMP_AMM_PROGRAM_ID.toBase58();
+// the reads pump.fun's SDK makes, answered by getAccounts(addresses) → [{data:[b64], owner, lamports}|null]
+export function connectionOf(getAccounts) {
+  const toInfo = (a) => (a ? { data: Buffer.from(a.data[0], 'base64'), owner: new PublicKey(a.owner), lamports: a.lamports, executable: !!a.executable, rentEpoch: 0 } : null);
+  const c = {
+    commitment: 'confirmed',
+    getMultipleAccountsInfo: async (keys) => (await getAccounts(keys.map((k) => new PublicKey(k).toBase58()))).map(toInfo),
+    getAccountInfo: async (k) => (await c.getMultipleAccountsInfo([k]))[0],
+    getMinimumBalanceForRentExemption: async (n) => (n + 128) * 6960,
+  };
+  return c;
+}
+const hopJson = (h) => ({ venue: h.venue, baseMint: h.baseMint.toBase58(), quoteMint: h.quoteMint.toBase58(), baseTokenProgram: h.baseTokenProgram.toBase58(), quoteTokenProgram: h.quoteTokenProgram.toBase58() });
+const hopKeys = (h) => ({ venue: h.venue, baseMint: new PublicKey(h.baseMint), quoteMint: new PublicKey(h.quoteMint), baseTokenProgram: new PublicKey(h.baseTokenProgram), quoteTokenProgram: new PublicKey(h.quoteTokenProgram) });
+// $X as a pair: admitted by pump.fun as a quote (a pump coin, not too deep, not mayhem), tradable against SOL (its curve or
+// its canonical SOL pool), and what pricing both hops needs. Throws with a reason a person can act on.
+export async function resolvePair(getAccounts, st, xMint) {
+  let x; try { x = new PublicKey(String(xMint).trim()); } catch { throw new Error('that is not a token address'); }
+  if (x.toBase58() === WSOL) throw new Error('SOL is the default — leave the pair empty');
+  const sdk = new OnlinePumpSdk(connectionOf(getAccounts));
+  let r; try { r = await sdk.resolveQuoteMint(x); } catch (e) { throw new Error(/UnsupportedQuoteMint|not supported|neither/i.test(e.message + e.name) ? 'pump.fun does not accept ' + short(x) + ' as a pair — it must be a pump.fun coin' : e.message); }
+  if (r.source !== 'pumpCoin' || !r.pumpQuote) throw new Error('pair with a pump.fun coin (this one is a listed quote like USDC, which arenalaunch does not route yet)');
+  let hop1; try { [hop1] = await sdk.resolveMultiHopRoute([new PublicKey(WSOL), x], 'buy'); } catch (e) { throw new Error(short(x) + ' cannot be bought with SOL in one step (' + e.message + ') — pick a coin paired with SOL'); }
+  const pq = r.pumpQuote; const bc = pq.curve.bondingCurve;
+  // pump.fun's buyback wallet's wrapped-SOL account: when it exists, buys skip creating it (keeps a buy inside one legacy tx)
+  const [bb, mi] = await getAccounts([ata(WSOL, BUYBACK0, TOKEN).toBase58(), x.toBase58()]);
+  let name = '', symbol = ''; // the coin's own Token-2022 metadata, for showing which coin it is
+  try { const info = { data: Buffer.from(mi.data[0], 'base64'), owner: new PublicKey(mi.owner), lamports: mi.lamports, executable: false }; const m = unpackMeta(getExtensionData(ExtensionType.TokenMetadata, unpackMint(x, info, info.owner).tlvData)); name = m.name; symbol = m.symbol; } catch {}
+  return {
+    name: String(name).slice(0, 32), symbol: String(symbol).slice(0, 13),
+    buybackOk: !!bb,
+    mint: x.toBase58(), tokenProgram: r.quoteTokenProgram.toBase58(), decimals: r.decimals, depth: pq.depth,
+    hop1: hopJson(hop1), accounts: pq.accounts, curve: pq.curve,
+    // hop 1 pricing: $X's curve, or its pool's reserves (base = $X, quote = SOL incl. the pool's virtual SOL)
+    x: hop1.venue === 'curve' ? { kind: 'curve', bc } : { kind: 'pool', base: pq.curve.pool?.baseReserves, quote: pq.curve.pool ? pq.curve.pool.quoteReserves.add(pq.curve.pool.virtualQuoteReserves || new BN(0)) : null },
+  };
+}
+const short = (k) => { const s = k.toBase58 ? k.toBase58() : String(k); return s.slice(0, 4) + '…' + s.slice(-4); };
+// $X a SOL amount buys on hop 1 (fees counted in full; the route charges less, so this errs low)
+function xFor(st, pair, lamports) {
+  if (!(lamports > 0)) return new BN(0);
+  const amt = new BN(String(Math.round(lamports)));
+  if (pair.x.kind === 'curve') { const bc = pair.x.bc; return getBuyTokenAmountFromSolAmount({ global: st.global, feeConfig: st.feeConfig, mintSupply: bc.tokenTotalSupply, bondingCurve: bc, amount: amt, quoteMint: new PublicKey(WSOL) }); }
+  if (!pair.x.base || !pair.x.quote) return new BN(0);
+  const net = amt.muln(98).divn(100); // pool fees are ~1.25% at most; 2% here
+  return net.mul(pair.x.base).div(pair.x.quote.add(net));
+}
+// new-coin tokens an amount of $X buys on its FRESH curve
+function newFor(st, pair, xAmount) {
+  if (!xAmount.gtn(0)) return new BN(0);
+  return getBuyTokenAmountFromSolAmount({ global: st.global, feeConfig: st.feeConfig, mintSupply: null, bondingCurve: null, amount: xAmount, quoteMint: new PublicKey(pair.mint), pumpQuote: pair.curve });
+}
+// tokens the k-th SOL buy gets when `before` lamports were spent ahead of it (both curves move with every buy)
+export function pairedTokensAt(st, pair, before, lamports) {
+  const x0 = xFor(st, pair, before), x1 = xFor(st, pair, before + lamports);
+  return newFor(st, pair, x1).sub(newFor(st, pair, x0));
+}
+const BUYBACK0 = '5YxQFdt3Tr9zJLvkFccqXVUwhdTWJQc1fFg2YPbxvxeD'; // the SDK's default buyback recipient (first listed)
+export const pairedHops = (t) => [hopKeys(t.quote.hop1), { venue: 'curve', baseMint: new PublicKey(t.mint), quoteMint: new PublicKey(t.quote.mint), baseTokenProgram: new PublicKey(TOKEN22), quoteTokenProgram: new PublicKey(t.quote.tokenProgram) }];
+// one SOL → $X → new coin buy for `owner`: its token accounts, the swap, and the WSOL account closed again.
+// buybackOk (the buyer's OWN read of the chain, see resolvePair): leave out creating pump.fun's buyback account
+export async function pairedBuyIxsFor(t, owner, lamports, minOut, buybackOk = false) {
+  const ixs = await PUMP_SDK.multiHopSwapInstructions({ user: new PublicKey(owner), hops: pairedHops(t), side: 'buy', amountIn: new BN(String(lamports)), minAmountOut: new BN(minOut.toString()), buybackFeeRecipient: new PublicKey(BUYBACK0) });
+  return buybackOk ? ixs.filter((ix) => !(ix.programId.toBase58() === ATA_PROGRAM && ix.keys[2]?.pubkey.toBase58() === BUYBACK0)) : ixs;
+}
+// any buy of a launch, SOL-quoted or paired
+export async function buyIxsAny(t, owner, lamports, minOut, buybackOk) { return t.quote ? pairedBuyIxsFor(t, owner, lamports, minOut, buybackOk) : buyIxsFor(t, owner, lamports, minOut); }
+// The paired create: create_v2 quoted in $X + the dev's SOL → $X → coin buy. Same shape as buildCreate's result.
+export async function buildPairedCreate(st, pair, { mint, creator, name, symbol, uri, holderReward, devLamports, devMinOut }) {
+  const createOf = (m) => PUMP_SDK.createV2Instruction({ mint: m, name, symbol, uri, creator, user: creator, mayhemMode: false, holderReward: !!holderReward, quoteMint: new PublicKey(pair.mint), quoteTokenProgram: new PublicKey(pair.tokenProgram), pumpQuote: pair.accounts });
+  const template = { v: 3, kind: 'pump', mint: mint.toBase58(), mintB: pair.mint, quoteDecimals: pair.decimals, creator: creator.toBase58(), holderReward: !!holderReward, buyKeys: [], quote: { mint: pair.mint, tokenProgram: pair.tokenProgram, hop1: pair.hop1, depth: pair.depth } };
+  const ixs = [await createOf(mint), ...(await pairedBuyIxsFor(template, creator, devLamports, devMinOut, pair.buybackOk))];
+  const other = Keypair.generate().publicKey; const ot = { ...template, mint: other.toBase58() };
+  const otherKeys = new Set([await createOf(other), ...(await pairedBuyIxsFor(ot, creator, devLamports, devMinOut))].flatMap((ix) => ix.keys.map((k) => k.pubkey.toBase58())));
+  template.perMintKeys = [...new Set(ixs.flatMap((ix) => ix.keys.map((k) => k.pubkey.toBase58())))].filter((k) => !otherKeys.has(k));
+  return { ixs, template, ata: (owner) => ata(mint, owner, TOKEN22).toBase58() };
+}
+// a teammate's check of a paired template: everything the buy uses is rebuilt from the mint, the pair and THEIR OWN read of
+// $X's route; the dev's hop is used only if it matches that read. Returns null when sound, else the reason.
+export async function pairedTemplateBad(getAccounts, st, t, dev) {
+  if (t?.kind !== 'pump' || !t.mint || !t.creator || !t.quote?.mint) return 'not a paired pump.fun launch template';
+  if (t.creator !== dev) return 'the coin\'s creator is not the lobby dev';
+  if (t.mintB !== t.quote.mint) return 'the template names two different pairs';
+  let pair; try { pair = await resolvePair(getAccounts, st, t.quote.mint); } catch (e) { return 'the pair does not check out: ' + e.message; }
+  if (pair.tokenProgram !== t.quote.tokenProgram) return 'the pair\'s token program is wrong';
+  const a = JSON.stringify(pair.hop1), b = JSON.stringify(hopJson(hopKeys(t.quote.hop1)));
+  if (a !== b) return 'the dev\'s route to the pair differs from the one on chain';
+  return null;
+}

@@ -7,7 +7,7 @@ import bs58 from 'bs58';
 import BN from 'bn.js';
 import { lockIx, LOCK_FEE_SOL, LOCK_FEE_PCT } from './lock.js';
 import * as PF from './profile.js';
-import { pumpState, buildCreate, buyIxsFor, tokensFor, tokensAt, altKeysOf, signersOf, templateBad, feeSplitIxs, equalShares, TREASURY, LAUNCH_TAX_BPS, HUSHER_TAX_BPS, launchTaxIx } from './pump.js';
+import { pumpState, buildCreate, buyIxsFor, tokensFor, tokensAt, altKeysOf, signersOf, templateBad, feeSplitIxs, equalShares, TREASURY, LAUNCH_TAX_BPS, HUSHER_TAX_BPS, launchTaxIx, resolvePair, buildPairedCreate, pairedBuyIxsFor, pairedTokensAt, pairedTemplateBad } from './pump.js';
 import { husherFee } from '../api/_fees.js';
 import { vaultKey } from './vault.js';
 
@@ -311,6 +311,17 @@ async function signTx(tx) { if (W.mode === 'phantom') return (await ensurePhanto
 // ---------------- pump.fun state (global + fee config), cached briefly ----------------
 let PS = null, PSat = 0;
 async function pump() { if (PS && Date.now() - PSat < 30000) return PS; PS = await pumpState(getAccounts); PSat = Date.now(); return PS; }
+// a paired coin's pair ($X), read fresh from chain (its price moves): {mint, symbol, hop1, ...} — see pump.js resolvePair
+const PAIR = { mint: '', info: null, err: null, busy: false, at: 0 };
+async function pairOf(mint) { return resolvePair(getAccounts, await pump(), mint); }
+async function checkPair(force) {
+  const m = (L.pair || '').trim(); if (!m) { Object.assign(PAIR, { mint: '', info: null, err: null }); render(); return null; }
+  if (!force && PAIR.mint === m && (PAIR.info || PAIR.err) && Date.now() - PAIR.at < 60000) return PAIR.info;
+  Object.assign(PAIR, { mint: m, busy: true, err: null }); render();
+  try { PAIR.info = await pairOf(m); } catch (e) { PAIR.info = null; PAIR.err = e.message; } finally { PAIR.busy = false; PAIR.at = Date.now(); render(); }
+  return PAIR.info;
+}
+const pairLabel = (p) => (p?.symbol ? '$' + p.symbol : short(p?.mint || ''));
 const lam = (sol) => Math.round(Number(sol) * 1e9);
 const prioIxs = (cu, prioSol) => [ComputeBudgetProgram.setComputeUnitLimit({ units: cu }), ComputeBudgetProgram.setComputeUnitPrice({ microLamports: Math.max(1, Math.floor((Number(prioSol) || 0) * 1e15 / cu)) })];
 
@@ -566,11 +577,14 @@ async function memberBuyTx(t, owner, sol, lock = false) {
   const roster = (Y.roster?.members || []).reduce((a, m) => a + lam(Math.min(100, Number(m.amount) || 0) + Math.min(1000, Number(m.extra?.sol) || 0)), 0);
   const bound = (Number(t.devLamports) || 0) + roster;
   const before = Math.max(0, Math.min(Number(t.plannedLamports) || 0, bound) - mine);
-  const minOut = tokensAt(st, before, mine).muln(lock ? 85 : 50).divn(100);
+  // a paired coin: priced through $X as I read it from chain myself, and bought SOL → $X → coin in one swap
+  const pair = t.quote ? await pairOf(t.quote.mint) : null;
+  const minOut = (pair ? pairedTokensAt(st, pair, before, mine) : tokensAt(st, before, mine)).muln(lock ? 85 : 50).divn(100);
   const tx = new Transaction({ feePayer: owner, recentBlockhash: t.blockhash });
-  // the dev picks the priority fee, but a teammate never pays more than 0.01 SOL of it, nor asks for more than 400k CU
-  const cu = Math.min(400000, Math.max(100000, Math.round(Number(t.cu) || 200000))), prio = Math.min(MEMBER_PRIO_MAX, Math.max(0, Number(t.prio) || 0));
-  tx.add(...prioIxs(cu, prio), ...buyIxsFor(t, owner, mine, minOut.gtn(0) ? minOut : new BN(1)), launchTaxIx(owner, mine), ...buyTipIxs(t, owner));
+  // the dev picks the priority fee, but a teammate never pays more than 0.01 SOL of it, nor asks for more than 400k CU (600k for a two-hop paired buy)
+  const cu = Math.min(pair ? 600000 : 400000, Math.max(100000, Math.round(Number(t.cu) || 200000))), prio = Math.min(MEMBER_PRIO_MAX, Math.max(0, Number(t.prio) || 0));
+  const m1 = minOut.gtn(0) ? minOut : new BN(1);
+  tx.add(...prioIxs(cu, prio), ...(pair ? await pairedBuyIxsFor(t, owner, mine, m1, pair.buybackOk) : buyIxsFor(t, owner, mine, m1)), launchTaxIx(owner, mine), ...buyTipIxs(t, owner));
   tx.minOut = minOut;
   return tx;
 }
@@ -597,7 +611,7 @@ const buyTipIxs = (t, owner) => { const l = Math.min(BUNDLE_TIP_MAX, Math.max(0,
 // before signing anything the dev sent: a fresh coin (its mint not on chain yet) made by this lobby's dev, every buy account
 // re-derived from the mint (so the buy can only ever be of THIS launch)
 async function checkSignRequest(t) {
-  const bad = await templateBad(await pump(), t, Y.roster?.dev || null); if (bad) throw new Error(bad);
+  const bad = t?.quote ? await pairedTemplateBad(getAccounts, await pump(), t, Y.roster?.dev || null) : await templateBad(await pump(), t, Y.roster?.dev || null); if (bad) throw new Error(bad);
   if (!(Number(t.devLamports) > 0)) throw new Error('the relay did not confirm the dev buy — reload the page');
   if (Number(t.devLamports) > 100e9) throw new Error('the dev buy is over 100 SOL');
   if (t.lockUntil && Number(t.lockUntil) > Date.now() / 1000 + 7 * 86400 + 2 * 3600) throw new Error('the dev asked for a lock longer than 7 days');
@@ -617,6 +631,7 @@ async function onLobby(b) {
         const amt = Number(Y.amount); if (!(amt > 0 && amt <= 100)) throw new Error('set a buy between 0 and 100 SOL');
         await checkSignRequest(b.template);
         log('info', 'lobby: the dev buys ' + fsol(Number(b.template.devLamports) / 1e9) + ' SOL ahead of the squad');
+        if (b.template.quote) { const p = await pairOf(b.template.quote.mint).catch(() => null); log('info', 'lobby: this coin is paired with ' + (p ? pairLabel(p) : short(b.template.quote.mint)) + ' — your SOL buys ' + (p ? pairLabel(p) : 'it') + ' first, then the coin, in one swap'); }
         const owner = new PublicKey(address());
         // rehearsal: sign against a made-up blockhash so this signature can never be used for a real buy, even if the relay wanted to
         const canLock = !!b.template.lockUntil; const locks = [];
@@ -650,7 +665,7 @@ async function onLobby(b) {
 }
 
 // ---------------- launch (dev) ----------------
-const L = Object.assign({ name: '', symbol: '', description: '', website: '', twitter: '', telegram: '', fees: 'me', fire: 'block0', countdown: 30, prio: 0.0005 }, ls.get('sq_pump_launch', {}));
+const L = Object.assign({ name: '', symbol: '', description: '', website: '', twitter: '', telegram: '', fees: 'me', fire: 'block0', countdown: 30, prio: 0.0005, pair: '' }, ls.get('sq_pump_launch', {}));
 delete L.devBuySol; Object.defineProperty(L, 'devBuySol', { get: mainAmt, enumerable: false }); // the dev buy is the ★ wallet's buy
 const saveL = () => ls.set('sq_pump_launch', L);
 let LOGO = ls.get('sq_logo', null); // {name,type,size,dataUrl, uri?, key?}
@@ -708,11 +723,11 @@ const teamSolOf = (m) => m.amount + (m.extra?.sol || 0); const teamNOf = (m) => 
 const teamReady = () => (Y.roster?.members || []).filter((m) => m.role === 'member' && m.online && m.ready && m.amount > 0 && m.amount <= 100);
 const teamFunded = () => teamReady().filter((m) => m.balance != null && m.balance >= memberNeed(m));
 // plan the buys: who rides inside the create, who follows, and each buy's minimum tokens out
-function plan(st, wallets, team) {
-  const dev = lam(L.devBuySol); let spent = dev;
-  const ws = wallets.map((w) => { const l = lam(w.amount); const minOut = tokensAt(st, spent, l).muln(85).divn(100); spent += l; return { w, pk: new PublicKey(w.address), lamports: l, minOut }; });
+function plan(st, wallets, team, pair) {
+  const dev = lam(L.devBuySol); let spent = dev; const at = (before, l) => (pair ? pairedTokensAt(st, pair, before, l) : tokensAt(st, before, l));
+  const ws = wallets.map((w) => { const l = lam(w.amount); const minOut = at(spent, l).muln(85).divn(100); spent += l; return { w, pk: new PublicKey(w.address), lamports: l, minOut }; });
   const planned = spent + team.reduce((s, m) => s + lam(teamSolOf(m)), 0);
-  return { dev, devMinOut: tokensFor(st, dev).muln(95).divn(100), ws, planned };
+  return { dev, devMinOut: (pair ? at(0, dev) : tokensFor(st, dev)).muln(pair ? 90 : 95).divn(100), ws, planned };
 }
 async function launch(dry) {
   if (launching) throw new Error('already launching');
@@ -737,13 +752,19 @@ async function launch(dry) {
     CD.at = Date.now() + goLive * 1000; CD.stage = 'uploading metadata'; tick();
     const [uri, st] = await Promise.all([metadataUri(), pump()]);
     if (L.fees === 'holders' && !st.global.isHolderRewardEnabled) throw new Error('pump.fun has holder-reward coins switched off right now — pick "me"');
+    // paired with another pump.fun coin: read it fresh (its price moves) — every buy goes SOL → $X → the coin
+    const pair = (L.pair || '').trim() ? await pairOf(L.pair.trim()) : null;
+    if (pair && L.fees !== 'me') throw new Error('a paired coin keeps its creator fees with the dev wallet for now — pick "Dev wallet" under Creator fees');
+    if (pair) log('info', 'launch: paired with ' + pairLabel(pair) + ' (' + pair.mint + ') via its ' + (pair.hop1.venue === 'pool' ? 'PumpSwap pool' : 'bonding curve') + ' — every buy pays SOL, swaps through ' + pairLabel(pair) + ' into the coin');
     const team = teamFunded();
-    const p = plan(st, extraWallets(), team);
+    const p = plan(st, extraWallets(), team, pair);
     const mintKp = Keypair.generate();
-    const built = await buildCreate(st, { mint: mintKp.publicKey, creator: me, name: L.name.trim(), symbol: L.symbol.trim().toUpperCase(), uri, holderReward: L.fees === 'holders', devLamports: p.dev, devMinOut: p.devMinOut });
+    const cargs = { mint: mintKp.publicKey, creator: me, name: L.name.trim(), symbol: L.symbol.trim().toUpperCase(), uri, holderReward: L.fees === 'holders', devLamports: p.dev, devMinOut: p.devMinOut };
+    const built = pair ? await buildPairedCreate(st, pair, cargs) : await buildCreate(st, cargs);
+    const buyOf = async (t, pk, l, mo) => (pair ? pairedBuyIxsFor(t, pk, l, mo, pair.buybackOk) : buyIxsFor(t, pk, l, mo));
     // how many of my wallets fit inside the create transaction (sized against a table holding every account)
-    const buyIx = p.ws.map((x) => buyIxsFor(built.template, x.pk, x.lamports, x.minOut));
-    const cuFor = (n) => Math.min(1400000, 260000 + 130000 * n);
+    const buyIx = await Promise.all(p.ws.map((x) => buyOf(built.template, x.pk, x.lamports, x.minOut)));
+    const cuFor = (n) => Math.min(1400000, (pair ? 1000000 : 260000) + (pair ? 450000 : 130000) * n);
     const msgFor = (n, alt, bh) => new TransactionMessage({ payerKey: me, recentBlockhash: bh, instructions: [...prioIxs(cuFor(n), (Number(L.prio) || 0) * (L.fire === 'safe' ? 1 : 3)), ...built.ixs, launchTaxIx(me, p.dev), ...buyIx.slice(0, n).flat(), ...(L.fire === 'safe' ? [] : [tipIx(me, BUNDLE_TIP_CREATE)])] }).compileToV0Message([alt]);
     const all = [...built.ixs, ...buyIx.flat()]; const keys = altKeysOf(all, signersOf(all));
     const planAlt = new AddressLookupTableAccount({ key: Keypair.generate().publicKey, state: { deactivationSlot: NEVER, lastExtendedSlot: 0, lastExtendedSlotStartIndex: 0, addresses: keys.map((k) => new PublicKey(k)) } });
@@ -773,12 +794,12 @@ async function launch(dry) {
       log('success', 'launch: simulated OK on mainnet (' + (sim?.unitsConsumed || '?') + ' compute units)');
     }
     // my wallets that did not fit: ordinary transactions, fired by the relay the instant the create lands
-    const template = { ...built.template, blockhash: bh, plannedLamports: p.planned, cu: 200000, prio: Number(L.prio) || 0, bundleTip: L.fire === 'safe' ? 0 : BUNDLE_TIP_BUY, lockUntil: Math.floor((CD.at || Date.now()) / 1000) + (Number(L.lockHours) || 24) * 3600 };
+    const template = { ...built.template, blockhash: bh, plannedLamports: p.planned, cu: pair ? 600000 : 200000, prio: Number(L.prio) || 0, bundleTip: L.fire === 'safe' ? 0 : BUNDLE_TIP_BUY, lockUntil: Math.floor((CD.at || Date.now()) / 1000) + (Number(L.lockHours) || 24) * 3600 };
     const locks = [];
     if (lockedW(activeW())) locks.push(rawOf(await signTx(await lockTxFor(template, me, p.devMinOut))));
     const localTxs = [];
     for (const x of after) {
-      const t = new Transaction({ feePayer: x.pk, recentBlockhash: bh }); t.add(...prioIxs(200000, L.prio), ...buyIxsFor(template, x.pk, x.lamports, x.minOut), launchTaxIx(x.pk, x.lamports), ...buyTipIxs(template, x.pk));
+      const t = new Transaction({ feePayer: x.pk, recentBlockhash: bh }); t.add(...prioIxs(pair ? 600000 : 200000, L.prio), ...(await buyOf(template, x.pk, x.lamports, x.minOut)), launchTaxIx(x.pk, x.lamports), ...buyTipIxs(template, x.pk));
       if (x.w.id === 'phantom') log('warn', 'launch: approve the Phantom wallet\'s buy in Phantom NOW');
       const st2 = await signAs(x.w, t); localTxs.push(bs58.encode(st2.serialize({ requireAllSignatures: true, verifySignatures: true })));
       if (lockedW(x.w)) locks.push(rawOf(await signAs(x.w, await lockTxFor(template, x.pk, x.minOut))));
@@ -942,10 +963,14 @@ function render() {
   const devHere = Y.connected && Y.role === 'dev';
   $('#launchCard').classList.toggle('off', !devHere);
   $('#lHint').textContent = devHere ? 'You are the dev of lobby ' + Y.code + '. Fill this in, rehearse, then launch — ready teammates sign on their own.' : 'Host a lobby to launch as its dev. Teammates don\'t need this section.';
-  for (const k of ['name', 'symbol', 'description', 'website', 'twitter', 'telegram']) val('#l_' + k, L[k]);
+  for (const k of ['name', 'symbol', 'description', 'website', 'twitter', 'telegram', 'pair']) val('#l_' + k, L[k]);
+  { const m = (L.pair || '').trim(); const n = $('#lPairNote');
+    n.textContent = !m ? 'Leave empty for a normal SOL coin. Paste a pump.fun coin\'s address to pair with it: everyone still pays in SOL, and each buy swaps SOL → that coin → yours in one go.' : PAIR.busy || PAIR.mint !== m ? 'checking ' + short(m) + '…' : PAIR.err ? '✖ ' + PAIR.err : '✔ paired with ' + pairLabel(PAIR.info) + (PAIR.info.name ? ' (' + PAIR.info.name + ')' : '') + ' · bought through its ' + (PAIR.info.hop1.venue === 'pool' ? 'PumpSwap pool' : 'bonding curve') + '. Your coin\'s price and creator fees are in ' + pairLabel(PAIR.info) + '.';
+    n.classList.toggle('bad', !!(m && PAIR.err && PAIR.mint === m)); }
   $('#lNameCnt').textContent = L.name.length + '/32'; $('#lSymCnt').textContent = L.symbol.length + '/13';
   document.querySelectorAll('#lFees button').forEach((b) => b.classList.toggle('on', b.dataset.v === L.fees));
   $('#lFeesNote').textContent = L.fees === 'holders' ? 'Holder-rewards coin: the creator fee on every trade is paid out to holders by pump.fun. Permanent.' : L.fees === 'squad' ? 'The creator fee on every trade is split equally between you and every teammate in the lobby (max 10 people), set on pump.fun right after the block-0 buys and locked for good. Costs ~0.006 SOL.' : 'Regular coin: the creator fee on every trade goes to your ★ wallet (claim it on pump.fun).';
+  if ((L.pair || '').trim() && L.fees !== 'me') $('#lFeesNote').textContent = '⚠ A paired coin keeps its creator fees with the dev wallet for now — pick "Dev wallet" to launch it.';
   val('#lCountdown', L.countdown); val('#lPrio', L.prio); if(document.activeElement!==$('#lDevBuy')) $('#lDevBuy').value = mainAmt() || '';
   document.querySelectorAll('#lFireMode button').forEach((b) => b.classList.toggle('on', b.dataset.v === (L.fire === 'safe' ? 'safe' : 'block0')));
   document.querySelectorAll('#lLock button').forEach((b) => b.classList.toggle('on', Number(b.dataset.v) === (Number(L.lockHours) || 24)));
@@ -1085,6 +1110,8 @@ function bind() {
   // coin form
   const lim = { name: 32, symbol: 13, description: 500 };
   for (const k of ['name', 'symbol', 'description', 'website', 'twitter', 'telegram']) $('#l_' + k).addEventListener('input', () => { L[k] = $('#l_' + k).value.slice(0, lim[k] || 200); saveL(); render(); });
+  $('#l_pair').addEventListener('input', () => { L.pair = $('#l_pair').value.trim().slice(0, 44); saveL(); clearTimeout(PAIR.t); PAIR.t = setTimeout(() => checkPair(true), 500); render(); });
+  if ((L.pair || '').trim()) checkPair();
   document.querySelectorAll('#lFees button').forEach((b) => (b.onclick = () => { L.fees = b.dataset.v; saveL(); render(); }));
   $('#lDevBuy').oninput = () => setMainAmt($('#lDevBuy').value);
   $('#lCountdown').onchange = () => { L.countdown = Math.min(600, Math.max(0, Math.round(Number($('#lCountdown').value) || 0))); saveL(); render(); };

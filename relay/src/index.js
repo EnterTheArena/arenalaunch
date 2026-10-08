@@ -412,6 +412,7 @@ export class Lobby {
             this.log('info', 'the dev buys ' + (chk.devLamports / 1e9) + ' SOL in the create' + (devLocalLamports ? ' + ' + (devLocalLamports / 1e9) + ' SOL from their other wallets' : ''));
             // squad fee split: the dev pre-signs pump.fun's fee sharing for the dev + EVERY ready teammate; we send it after the buys
             let feeTx = null, feeSplit = null;
+            if (b.feeTx && b.template?.quote) return this.send(ws, { t: 'error', msg: 'launch refused: a paired coin cannot split its creator fees yet' });
             if (b.feeTx) {
               const want = [this.dev, ...this.expected().map((x) => x.wallet)];
               const r = checkFeeSplit(String(b.feeTx), b.template?.mint, this.dev, want);
@@ -584,8 +585,8 @@ export class Lobby {
     signedMembers.forEach((m, p) => { members.push({ name: m.name, wallet: m.wallet, amount: m.amount, raw: signed.get(m.wallet), person: p + 1, rank: 0 }); (L.extras?.[m.wallet] || []).forEach((x, i) => members.push({ name: m.name + ' · ' + short(x.wallet), wallet: x.wallet, amount: x.amount, raw: x.tx, person: p + 1, rank: i + 1 })); });
     // pre-flight: one underfunded buy fails the WHOLE bundle (create included) → drop anyone short.
     // The dev's own extra wallets get the same check: their buys are parsed for signer + amount.
-    const quoteIsSol = !L.template?.mintB || L.template.mintB === WSOL_MINT; const dec = L.template?.quoteDecimals ?? 9;
-    let locals = (L.localTxs || []).map((raw, i) => { let wallet = null, amount = 0; try { const t = parseLegacy(bs58.decode(raw)); wallet = t.keys[0]; const ix = t.ixs.find((x) => x.program === LAUNCHLAB || x.program === PUMP); if (ix) amount = Number(u64(ix.data, 8)) / 10 ** dec; } catch {} return { name: 'dev wallet ' + (i + 1) + (wallet ? ' ' + short(wallet) : ''), wallet, amount, raw, person: 0, rank: i + 1 }; });
+    const quoteIsSol = !L.template?.mintB || L.template.mintB === WSOL_MINT || !!L.template.quote; const dec = L.template?.quote ? 9 : L.template?.quoteDecimals ?? 9; // a paired coin is still bought with SOL
+    let locals = (L.localTxs || []).map((raw, i) => { let wallet = null, amount = 0; try { const t = parseLegacy(bs58.decode(raw)); wallet = t.keys[0]; const ix = t.ixs.find((x) => x.program === LAUNCHLAB || x.program === PUMP || isMultiHop(x)); if (ix) amount = Number(u64(ix.data, 8)) / 10 ** dec; } catch {} return { name: 'dev wallet ' + (i + 1) + (wallet ? ' ' + short(wallet) : ''), wallet, amount, raw, person: 0, rank: i + 1 }; });
     const bad = locals.filter((x) => !x.wallet || !(x.amount > 0)); if (bad.length) { this.log('warn', 'dropped unparseable dev-wallet buys: ' + bad.map((x) => x.name).join(', ')); locals = locals.filter((x) => !bad.includes(x)); }
     const all = [...members, ...locals];
     if (all.length) {
@@ -716,7 +717,7 @@ function parseTx(bytes) {
   return { keys, nreq, ixs };
 }
 // SOL a pump.fun buy spends (buy_exact_quote_in_v2: lamports at byte 8 of its data); 0 when there is none
-function pumpBuyAmount(bytes) { try { const ix = parseLegacy(bytes).ixs.find((x) => x.program === PUMP && x.data.length === 24); return ix ? Number(u64(ix.data, 8)) / 1e9 : 0; } catch { return 0; } }
+function pumpBuyAmount(bytes) { try { const ix = parseLegacy(bytes).ixs.find((x) => (x.program === PUMP || (x.program === AMM && MULTI_HOP.every((v, i) => x.data[i] === v))) && x.data.length === 24); return ix ? Number(u64(ix.data, 8)) / 1e9 : 0; } catch { return 0; } }
 const firstSigner = (bytes) => { try { return parseLegacy(bytes).keys[0]; } catch { return null; } };
 const TIP_ACCOUNTS = new Set(['DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh', 'ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1zt6iGPaS49', '3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT', 'HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe', 'ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt', 'Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY', '96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5', 'DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL']);
 const SYSTEM = '11111111111111111111111111111111', CB = 'ComputeBudget111111111111111111111111111111', ATA_PROG = 'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL', LAUNCHLAB = 'LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj', PUMP = '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P';
@@ -843,6 +844,7 @@ export function checkFeeSplit(b58, mint, dev, want) {
 // launch fee + at most one bundle tip. Anything else (a second buy, another program, another signer's transfer) is refused,
 // so the dev cannot slip extra buys ahead of the squad or skip the fee. Returns {devLamports} or {err}.
 export function checkPumpLaunch(createB58, t, dev) {
+  if (t?.quote) return checkPairedLaunch(createB58, t, dev);
   let tx; try { tx = parseTx(bs58.decode(createB58)); } catch { return { err: 'the launch transaction cannot be read' }; }
   if (!t?.mint || !t.creator || !Array.isArray(t.buyKeys)) return { err: 'incomplete template' };
   if (!dev || tx.keys[0] !== dev) return { err: 'the launch transaction is not paid by the lobby dev' };
@@ -891,6 +893,7 @@ export function prioBad(ixs) {
 // the dev's buy (fee recipients, curve, creator vault...) AND derived from the template's mint, only the buyer's own
 // token-account creations besides it, a capped priority fee, and no SOL transfers but one bundle tip and the 3% launch tax.
 export function validatePumpBuy(bytes, member, L) {
+  if (L.template?.quote) return validatePairedBuy(bytes, member, L);
   let tx; try { tx = parseLegacy(bytes); } catch { return 'unparseable tx'; }
   const t = L.template; if (!t?.buyKeys || !t.mint) return 'no template';
   if (tx.keys[0] !== member.wallet) return 'not signed by your wallet';
@@ -1060,4 +1063,113 @@ async function dropReason(ids) {
   if (st.includes('Pending')) return 'still pending in Jito after 30s — never scheduled by a leader (tip too low for the moment)';
   if (st.length && st.every((x) => x === 'Invalid')) return 'no Jito region has a record of it (' + st.length + ' asked) — dropped at intake or never scheduled; the usual cause is a tip too low for the moment';
   return 'no status from any Jito region';
+}
+
+// ---- paired launches: the coin is quoted in another pump.fun coin $X; every buy is ONE pump-amm multi_hop_swap
+// SOL → $X (on $X's curve or its canonical SOL pool) → the coin (on its fresh curve), exact-in, paid in SOL ----
+export const AMM = 'pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA';
+const MULTI_HOP = [43, 100, 73, 19, 233, 246, 111, 148];
+// the wallets pump.fun's buyback slice may go to (its SDK's list): the swap names one of their wrapped-SOL accounts
+const BUYBACK = ['5YxQFdt3Tr9zJLvkFccqXVUwhdTWJQc1fFg2YPbxvxeD', '9M4giFFMxmFGXtc3feFzRai56WbBqehoSeRE5GK7gf7', 'GXPFM2caqTtQYC2cJ5yJRi9VDkpsYZXzYdwYpGnLmtDL', '3BpXnfJaUTiwXnJNe7Ej1rcbzqTTQUvLShZaWazebsVR', '5cjcW9wExnJJiqgLjq7DEG75Pm6JBgE1hNv4B2vHXUW6', 'EHAAiTxcdDwQ3U4bU6YcMsQGaekdzLS3B5SmYo46kJtL', '5eHhjP8JaYkz83CWwvGU2uMUXefd3AazWGx4gpcuEEYD', 'A7hAgCzFw14fejgCp387JUJRMNyz4j89JKnhtKU8piqW'];
+const AMM_CONST = {};
+function ammConst() {
+  if (!AMM_CONST.global) Object.assign(AMM_CONST, { global: pda([text('global_config')], AMM), feeConfig: pda([text('fee_config'), AMM], PFEE), events: pda([text('__event_authority')], AMM), buyback: new Set(BUYBACK.map((b) => ata(b, TOKEN, WSOL_MINT))) });
+  return AMM_CONST;
+}
+const isB58Key = (s) => typeof s === 'string' && /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(s) && (() => { try { return bs58.decode(s).length === 32; } catch { return false; } })();
+export const ammPoolOf = (mint, quote) => pda([text('pool'), Uint8Array.of(0, 0), pda([text('pool-authority'), mint], PUMP), mint, quote], AMM);
+// the template's pair: a real key, a token program, and a first hop that is $X's curve or its canonical SOL pool
+export function pairedTemplateBad(t) {
+  const q = t?.quote; if (!q || !isB58Key(q.mint) || q.mint === WSOL_MINT || !isB58Key(t.mint)) return 'bad pair';
+  if (t.mintB !== q.mint) return 'the template names two different pairs';
+  if (q.tokenProgram !== TOKEN && q.tokenProgram !== TOKEN22) return 'the pair\'s token program is not a token program';
+  const h = q.hop1; if (!h || h.baseMint !== q.mint || h.quoteMint !== WSOL_MINT || h.quoteTokenProgram !== TOKEN || h.baseTokenProgram !== q.tokenProgram || !['curve', 'pool'].includes(h.venue)) return 'the route to the pair is not SOL → $X';
+  return null;
+}
+// the 26 accounts of a buy's multi_hop_swap, every one re-derived from the mint, the pair and the buyer. null when right.
+export function pairedSwapKeysBad(keys, t, user) {
+  if (!Array.isArray(keys) || keys.length !== 26) return 'swap account count mismatch';
+  const c = pumpConst(), a = ammConst(), X = t.quote.mint, xp = t.quote.tokenProgram;
+  const v1 = t.quote.hop1.venue === 'pool' ? ammPoolOf(X, WSOL_MINT) : pda([text('bonding-curve'), X], PUMP), v2 = pda([text('bonding-curve'), t.mint], PUMP);
+  const want = { 0: user, 1: ata(user, TOKEN, WSOL_MINT), 2: ata(user, TOKEN22, t.mint), 3: a.global, 4: a.feeConfig, 5: pda([text('user_volume_accumulator'), user], AMM), 7: TOKEN, 8: TOKEN22, 9: SYSTEM, 10: a.events, 11: AMM, 12: PUMP, 13: c.global, 14: c.feeConfig, 15: c.events,
+    16: X, 17: WSOL_MINT, 18: v1, 19: ata(v1, xp, X), 20: ata(v1, TOKEN, WSOL_MINT), 21: t.mint, 22: X, 23: v2, 24: ata(v2, TOKEN22, t.mint), 25: ata(v2, xp, X) };
+  for (const [i, k] of Object.entries(want)) if (keys[i] !== k) return 'swap account #' + (Number(i) + 1) + ' is not the one derived from the mint and its pair';
+  if (!a.buyback.has(keys[6])) return 'the buyback account is not one of pump.fun\'s';
+  return null;
+}
+const isMultiHop = (ix) => ix.program === AMM && ix.data.length === 24 && MULTI_HOP.every((v, i) => ix.data[i] === v);
+// the dev's paired launch: compute budget, create_v2 of the template's mint, ONE SOL → $X → coin swap paid by the dev and its
+// token accounts / wrapped-SOL handling, the 3% fee on the SOL in, at most one tip. Returns {devLamports} or {err}.
+export function checkPairedLaunch(createB58, t, dev) {
+  const pb = pairedTemplateBad(t); if (pb) return { err: pb };
+  let tx; try { tx = parseTx(bs58.decode(createB58)); } catch { return { err: 'the launch transaction cannot be read' }; }
+  if (!dev || tx.keys[0] !== dev) return { err: 'the launch transaction is not paid by the lobby dev' };
+  if (t.creator !== dev) return { err: 'the coin\'s creator is not the lobby dev' };
+  if (tx.nreq > 2) return { err: 'the launch transaction has extra signers' };
+  let create = null, swap = null, tax = null, tips = 0, wraps = 0; const plain = [];
+  for (const ix of tx.ixs) {
+    if (ix.program === CB) { if (ix.data[0] !== 2 && ix.data[0] !== 3) return { err: 'unexpected compute-budget instruction' }; continue; }
+    if (ix.program === PUMP && CREATE_V2.every((v, i) => ix.data[i] === v)) { if (create) return { err: 'two creates' }; create = ix; continue; }
+    if (isMultiHop(ix)) { if (swap) return { err: 'more than one buy in the launch transaction' }; swap = ix; continue; }
+    if (ix.program === PUMP || ix.program === AMM) return { err: 'unexpected pump.fun instruction in the launch transaction' };
+    if (ix.program === ATA_PROG) { if (ix.accounts[0] !== dev) return { err: 'token account paid by someone else' }; continue; } // its owner sits in the lookup table: harmless (a token account costs only rent)
+    if (ix.program === TOKEN && (ix.data[0] === 9 || ix.data[0] === 17) && ix.data.length === 1) continue; // close / sync the dev's wrapped SOL (only the dev and the mint sign)
+    if (isTransfer(ix) && ix.accounts[0] === dev) {
+      if (ix.accounts[1] === TREASURY) { if (tax) return { err: 'two launch fees' }; tax = ix; continue; }
+      if (HELIUS_TIPS.has(ix.accounts[1]) && u64(ix.data, 4) <= MAX_LAUNCH_TIP && ++tips <= 1) continue;
+      if (t.quote.hop1.venue === 'pool' && ++wraps <= 1) { plain.push(ix); continue; } // SOL into the dev's own wrapped-SOL account for the pool hop
+    }
+    return { err: 'unexpected instruction in the launch transaction' };
+  }
+  if (!create) return { err: 'no pump.fun create_v2 in the launch transaction' };
+  const mi = create.idx[0]; if (create.accounts[0] !== t.mint || !(mi < tx.nreq)) return { err: 'the create is for another mint than the template' };
+  if (!swap) return { err: 'the launch has no dev buy' };
+  if (swap.accounts[0] !== dev) return { err: 'the buy in the launch transaction is not the dev\'s' };
+  const devLamports = u64(swap.data, 8);
+  if (devLamports < 1n || devLamports > 100_000_000_000n) return { err: 'the dev buy must be between 0 and 100 SOL' };
+  if (u64(swap.data, 16) < 1n) return { err: 'min tokens out < 1' };
+  for (const w of plain) if (u64(w.data, 4) !== devLamports) return { err: 'unexpected transfer in the launch transaction' };
+  if (!tax || u64(tax.data, 4) !== launchTax(devLamports)) return { err: 'missing the 3% launch fee on the dev buy — reload the arenalaunch page' };
+  return { devLamports: Number(devLamports) };
+}
+// a buy of a paired coin: exactly one multi_hop_swap of THIS coin through THIS pair for the member's SOL, every account
+// derived here; besides it only the buyer's own token accounts (and pump.fun's buyback account), wrapping / unwrapping the
+// buyer's own SOL, a capped priority fee, the 3% launch fee and one bundle tip.
+export function validatePairedBuy(bytes, member, L) {
+  const t = L.template; { const pb = pairedTemplateBad(t); if (pb) return pb; }
+  let tx; try { tx = parseLegacy(bytes); } catch { return 'unparseable tx'; }
+  const w = member.wallet; if (tx.keys[0] !== w) return 'not signed by your wallet';
+  if (!L.dry && tx.blockhash !== t.blockhash) return 'wrong blockhash (stale template?)';
+  const fee = prioBad(tx.ixs); if (fee) return fee;
+  const want = BigInt(Math.round(member.amount * 1e9)), wsol = ata(w, TOKEN, WSOL_MINT), pool = t.quote.hop1.venue === 'pool';
+  let swaps = 0, tips = 0, taxed = 0, wraps = 0;
+  for (const ix of tx.ixs) {
+    if (ix.program === CB) continue;
+    if (ix.program === ATA_PROG) {
+      if (ix.accounts[0] !== w) return 'token account paid by someone else';
+      if (ix.accounts[2] === w) continue;
+      if (BUYBACK.includes(ix.accounts[2]) && ix.accounts[3] === WSOL_MINT) continue; // pump.fun's buyback account (the swap needs it to exist)
+      return 'token account for someone else';
+    }
+    if (ix.program === SYSTEM) {
+      if (!isTransfer(ix) || ix.accounts[0] !== w) return 'unexpected system instruction';
+      if (ix.accounts[1] === TREASURY) { if (u64(ix.data, 4) !== launchTax(want) || ++taxed > 1) return 'the 3% launch fee is wrong'; continue; }
+      if (pool && ix.accounts[1] === wsol && u64(ix.data, 4) === want && ++wraps <= 1) continue;
+      if (!HELIUS_TIPS.has(ix.accounts[1]) || u64(ix.data, 4) > MAX_BUY_TIP || ++tips > 1) return 'unexpected transfer (only one bundle tip of at most 0.00025 SOL is allowed)';
+      continue;
+    }
+    if (ix.program === TOKEN) {
+      if (ix.data.length === 1 && ix.data[0] === 17 && ix.accounts[0] === wsol) continue; // sync my wrapped SOL
+      if (ix.data.length === 1 && ix.data[0] === 9 && ix.accounts[0] === wsol && ix.accounts[1] === w && ix.accounts[2] === w) continue; // close it, SOL back to me
+      return 'unexpected token instruction';
+    }
+    if (!isMultiHop(ix)) return 'unexpected program ' + String(ix.program).slice(0, 6);
+    { const k = pairedSwapKeysBad(ix.accounts, t, w); if (k) return k; }
+    if (u64(ix.data, 8) !== want) return 'buy amount mismatch (' + u64(ix.data, 8) + ' vs ' + want + ')';
+    if (u64(ix.data, 16) < 1n) return 'min tokens out < 1';
+    swaps++;
+  }
+  if (swaps !== 1) return 'expected exactly one buy';
+  if (!taxed) return 'missing the 3% launch fee — reload the arenalaunch page';
+  return null;
 }

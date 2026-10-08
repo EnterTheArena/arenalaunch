@@ -103,7 +103,7 @@
   .star{background:none;border:0;cursor:pointer;font-size:19px;color:#3a3f52;padding:0;line-height:1;transition:color .12s,transform .12s} .star.on{color:var(--gold);text-shadow:0 0 14px rgba(255,210,74,.55)} .star:hover{color:var(--gold);transform:scale(1.12)}
   .x{background:none;border:0;color:var(--mute);cursor:pointer;font-size:15px;width:30px;height:30px;border-radius:8px} .x:hover{color:var(--ink);background:var(--panel3)}
   .pip{display:inline-block;width:10px;height:10px;border-radius:50%;background:#3a3f52} .pip.on{background:var(--ok);box-shadow:0 0 0 3px rgba(62,224,143,.15)}
-  .err{color:var(--err)}
+  .err{color:var(--err)} .note.bad{color:var(--err)}
 
   /* ---------- landing ---------- */
   .hero{max-width:1240px;margin:0 auto;padding:clamp(40px,8vh,96px) 24px 0;display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,.95fr);gap:56px;align-items:center}
@@ -544,6 +544,8 @@
           <div class="row"><div class="f"><label>Coin image</label><div class="img"><div class="pv" id="lLogoPrev"></div><div><input type="file" id="lLogo" accept="image/png,image/jpeg,image/webp,image/gif" class="hide" /><button class="btn sm" id="lLogoBtn">Choose image</button><div class="note" id="lLogoInfo"></div></div></div></div></div>
           <div class="row"><div class="f" style="flex:2"><label>Name <span class="c" id="lNameCnt"></span></label><input id="l_name" maxlength="32" placeholder="Coin name" /></div><div class="f"><label>Ticker <span class="c" id="lSymCnt"></span></label><input id="l_symbol" maxlength="13" placeholder="TICKER" style="text-transform:uppercase;font-family:var(--mono);font-weight:600" /></div></div>
           <div class="row"><div class="f"><label>Your buy · SOL <span class="help" tabindex="0" role="note" aria-label="About your buy" data-tip="The amount your ★ wallet buys at launch — this is the dev buy. It is the same as your ★ wallet's buy in the Wallets tab; change it in either place.">?</span></label><input id="lDevBuy" type="number" step="0.01" min="0" placeholder="0.00" /></div></div>
+          <div class="row"><div class="f"><label>Pair with <span class="help" tabindex="0" role="note" aria-label="About pairing" data-tip="pump.fun lets a new coin trade against another pump.fun coin instead of SOL. Everyone in the launch still pays in SOL: each buy swaps SOL into that coin and straight into yours, in one transaction. The 3% launch fee is taken on the SOL. Your coin's chart and creator fees are in the pair coin.">?</span></label><input id="l_pair" maxlength="44" placeholder="optional · a pump.fun coin address (default: SOL)" style="font-family:var(--mono)" autocomplete="off" spellcheck="false" /></div></div>
+          <p class="note" id="lPairNote" style="margin:-6px 0 16px"></p>
           <div class="row"><div class="f"><label>Creator fees</label><div class="seg" id="lFees"><button data-v="me">Dev wallet</button><button data-v="squad">Split with squad</button><button data-v="holders">Holders</button></div></div></div>
           <p class="note" id="lFeesNote" style="margin:-6px 0 16px"></p>
 

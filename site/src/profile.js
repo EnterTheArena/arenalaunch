@@ -8,11 +8,11 @@
 //   squad-split coins: the fees sit in the coin's sharing account until someone distributes them to every shareholder;
 //     anyone may do that, so the page offers it to every shareholder
 import { PublicKey, Transaction, ComputeBudgetProgram } from '@solana/web3.js';
-import { OnlinePumpSdk, PUMP_SDK, feeSharingConfigPda } from '@pump-fun/pump-sdk';
+import { OnlinePumpSdk, PUMP_SDK, feeSharingConfigPda, bondingCurvePda } from '@pump-fun/pump-sdk';
 
 const NATIVE_MINT = new PublicKey('So11111111111111111111111111111111111111112');
 const TOKEN_PROGRAM = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
-const PR = { busy: false, at: 0, launches: [], fees: {}, unclaimed: {}, amm: {}, splits: [], err: null, claiming: null };
+const PR = { busy: false, at: 0, launches: [], fees: {}, unclaimed: {}, amm: {}, buckets: {}, splits: [], err: null, claiming: null };
 const sol = (lamports) => Number(lamports) / 1e9;
 const f4 = (x) => (Math.round(x * 1e4) / 1e4).toString();
 
@@ -31,6 +31,20 @@ let SDK = null; const sdk = (ctx) => (SDK ||= new OnlinePumpSdk(connection(ctx))
 
 const myWallets = (ctx) => [...ctx.sols().map((w) => ({ id: w.id, name: w.name, address: w.address })), ...(ctx.phantomPk() ? [{ id: 'phantom', name: 'Phantom', address: ctx.phantomPk() }] : [])];
 
+// creator fees sitting on coins' curves (BondingCurve.creatorFee), by the curve's current creator: {creator: [{mint, fee}]}
+async function curveBuckets(ctx, launches) {
+  const mints = [...new Set(launches.map((x) => x.mint))].slice(0, 60); const out = {}; if (!mints.length) return out;
+  const infos = await connection(ctx).getMultipleAccountsInfo(mints.map((m) => bondingCurvePda(new PublicKey(m))));
+  infos.forEach((info, i) => {
+    let bc; try { bc = info && PUMP_SDK.decodeBondingCurveNullable(info); } catch { return; } if (!bc) return;
+    const fee = Number(bc.creatorFee?.toString() || 0); const q = bc.quoteMint?.toBase58?.();
+    if (!(fee > 0) || (q && q !== PublicKey.default.toBase58() && q !== NATIVE_MINT.toBase58())) return;
+    (out[bc.creator.toBase58()] ||= []).push({ mint: mints[i], fee });
+  });
+  return out;
+}
+const sweepIxs = (payer, creator, list) => Promise.all(list.slice(0, 6).map((b) => PUMP_SDK.sweepCreatorFeeInstruction({ payer: new PublicKey(payer), mint: new PublicKey(b.mint), creator: new PublicKey(creator), quoteMint: NATIVE_MINT, quoteTokenProgram: TOKEN_PROGRAM })));
+
 export async function load(ctx) {
   if (PR.busy || !ctx.A.session) return; PR.busy = true; PR.err = null; ctx.render();
   try {
@@ -42,7 +56,10 @@ export async function load(ctx) {
     // unclaimed, per wallet: bonding-curve vault + PumpSwap vault
     const s = sdk(ctx); PR.unclaimed = {};
     PR.amm = {};
-    for (const w of ws) { try { const pk = new PublicKey(w.address); const bc = Number((await s.getCreatorVaultBalance(pk)).toString()), amm = Number((await s.pumpAmmSdk.getCoinCreatorVaultBalance(pk)).toString()); PR.unclaimed[w.address] = bc + amm; PR.amm[w.address] = amm; } catch { PR.unclaimed[w.address] = null; } }
+    // fees newer pump.fun trades (v3) leave on each coin's curve until someone sweeps them to the creator's vault:
+    // counted as unclaimed, and swept by the claim. Only SOL-quoted coins (a paired coin earns in its pair token)
+    PR.buckets = await curveBuckets(ctx, PR.launches.filter((x) => !x.mint.startsWith('0x')));
+    for (const w of ws) { try { const pk = new PublicKey(w.address); const bc = Number((await s.getCreatorVaultBalance(pk)).toString()), amm = Number((await s.pumpAmmSdk.getCoinCreatorVaultBalance(pk)).toString()); PR.unclaimed[w.address] = bc + amm + (PR.buckets[w.address] || []).reduce((a, b) => a + b.fee, 0); PR.amm[w.address] = amm; } catch { PR.unclaimed[w.address] = null; } }
     // squad-split coins I hold a share of: what is waiting to be distributed
     PR.splits = []; const mine = new Set(ws.map((w) => w.address));
     const sol_ = PR.launches.filter((x) => !x.mint.startsWith('0x')).slice(0, 40);
@@ -51,7 +68,7 @@ export async function load(ctx) {
     for (const [i, info] of infos.entries()) {
       if (!info) continue; let cfg; try { cfg = PUMP_SDK.decodeSharingConfig(info); } catch { continue; }
       const me = (cfg.shareholders || []).find((h) => mine.has(h.address.toBase58())); if (!me) continue;
-      let pending = null; try { pending = Number((await s.getCreatorVaultBalanceBothPrograms(cfgAddrs[i])).toString()); } catch {}
+      let pending = null; try { pending = Number((await s.getCreatorVaultBalanceBothPrograms(cfgAddrs[i])).toString()) + ((PR.buckets[cfgAddrs[i].toBase58()] || [])[0]?.fee || 0); } catch {}
       PR.splits.push({ mint: sol_[i].mint, name: sol_[i].name, symbol: sol_[i].symbol, cfg, cfgAddr: cfgAddrs[i], pending, myBps: me.shareBps, n: cfg.shareholders.length });
     }
     PR.at = Date.now();
@@ -75,6 +92,8 @@ export async function claim(ctx, w) {
     // the SDK always adds the PumpSwap leg, which first creates an empty vault account (~0.002 SOL) when there is none:
     // only worth it once a coin has graduated and earned fees there; otherwise just the bonding-curve claim
     if (!(PR.amm?.[w.address] > 0)) ixs = ixs.filter((ix) => ix.programId.toBase58() === '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');
+    // first move the fees still on the coins' curves into the vault this claim empties
+    ixs = [...(await sweepIxs(w.address, w.address, PR.buckets[w.address] || [])), ...ixs];
     if (!ixs.length) throw new Error('nothing to claim');
     const sig = await send(ctx, w, ixs, 'claim');
     ctx.log('success', 'claimed ' + (amt != null ? f4(sol(amt)) + ' SOL of ' : '') + 'creator fees to ' + w.name + ' (' + sig + ')');
@@ -88,6 +107,7 @@ export async function distribute(ctx, sp, payer) {
     const mint = new PublicKey(sp.mint); const ixs = [];
     const amm = await new OnlinePumpSdk(connection(ctx)).pumpAmmSdk.getCoinCreatorVaultBalance(sp.cfgAddr).catch(() => null);
     if (amm && Number(amm.toString()) > 0) ixs.push(await PUMP_SDK.transferCreatorFeesToPumpV2({ payer: new PublicKey(payer.address), mint, quoteMint: NATIVE_MINT, quoteTokenProgram: TOKEN_PROGRAM }));
+    ixs.unshift(...(await sweepIxs(payer.address, sp.cfgAddr.toBase58(), PR.buckets[sp.cfgAddr.toBase58()] || [])));
     ixs.push(await PUMP_SDK.distributeCreatorFees({ mint, sharingConfig: sp.cfg, sharingConfigAddress: sp.cfgAddr }));
     const sig = await send(ctx, payer, ixs, 'distribute');
     ctx.log('success', 'distributed the creator fees of ' + (sp.symbol ? '$' + sp.symbol : sp.mint) + ' to its ' + sp.n + ' shareholders (' + sig + ')');
@@ -134,4 +154,4 @@ export function render(ctx) {
 
 export function bind(ctx) { ctx.$('#pRefresh').onclick = () => load(ctx); }
 export const loaded = () => PR.at > 0;
-export const reset = () => Object.assign(PR, { busy: false, at: 0, launches: [], fees: {}, unclaimed: {}, splits: [], err: null, claiming: null });
+export const reset = () => Object.assign(PR, { busy: false, at: 0, launches: [], fees: {}, unclaimed: {}, buckets: {}, splits: [], err: null, claiming: null });
